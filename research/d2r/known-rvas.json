@@ -8,7 +8,7 @@
       "name": "MAPSENSE_TeleportCandidateLevelPolicyWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 31-byte witness in the common canonical image: context at Game+0x106, CALL 0x554C7D -> 0x32C4A0, then Levels record byte +0x0E. Zero refuses; value two calls 0x350A20 with mask 0x804 before relocation through CALL 0x554CCE -> 0x491CA0. This is a coordinate trace with adjusted endpoints, not a destination-only collision mask. Entry 0x554C40 closely matches D2MOO SKILLS_SrvDo027_Teleport, but its initialized callback-table slot 27 is still unproven. No complete handler ABI, runtime cast or hook is qualified. D2MOO 19019806df7f3e877fa105b05395d1e3597e2316 SkillSor.cpp:874-898 supplies semantic corroboration only."
     },
     {
@@ -16,7 +16,7 @@
       "name": "MAPSENSE_LocationCommandRange50Witness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 28-byte argument/call/result witness passes 50 as fourth argument to coordinate validator 0x4FE1F0. The validator compares abs(targetX-unitX) and abs(targetY-unitY) independently and rejects only values greater than the bound, witnessed at 0x4FE255 and 0x4FE28E. Calls 0x4AD1A7 and 0x4AD297 also target this validator. This proves a per-axis inclusive command bound, not player viewport reach, mana, skill availability, packet opcode ownership or successful Teleport execution."
     },
     {
@@ -24,7 +24,7 @@
       "name": "MAPSENSE_GatedCoordinateTraceEndpointWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 46-byte coordinate-adjustment witness in 0x351720. The wrapper 0x350A20 supplies source coordinates, target coordinates, cached source size, fixed target size two, room and mask; CALL 0x350B10 -> 0x351720. Sizes clamp to two, Manhattan distance below the size sum returns clear, otherwise endpoints move inward along the dominant axis or both equal axes before CALL 0x3517E6 -> 0x363F20. The chain is used by the Teleport candidate's Levels.Teleport=2 branch with 0x804. Exact raster traversal, ties, room-border behavior and initialized skill dispatch remain unqualified. D2MOO Units.cpp:2768-2860 corroborates the trace semantics only."
     },
     {
@@ -32,7 +32,7 @@
       "name": "MAPSENSE_RelocationPlayerSizeAndMaskWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 37-byte relocation witness calls cached unit-size accessor 0x34B580, passes that size in R8D and collision mask 0x1C09 in R9D to 0x362F90. Earlier null destination-room handling calls 0x38DFB0 first with null then with the unit's current room. The free-position chain 0x362FBF -> 0x364E90, 0x364F69 -> 0x364D50, 0x364DE0 -> 0x366920 reaches the size-two cross check. It may adjust the requested landing; exact search order, complete ABI and dynamic occupancy remain gates."
     },
     {
@@ -40,7 +40,7 @@
       "name": "MAPSENSE_PlayerSizeTwoDispatchWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 46-byte unit-type dispatch witness in 0x3481E0. Unit type zero indexes the first DWORD at 0x34829C, which resolves to 0x34822A and returns EAX=2. Cached accessor 0x34B580 calls 0x3481E0 at 0x34B5B9 and 0x34B5F8. The size is a pattern selector, not a two-subtile radius. This corroborates native player placement only; complete walking path footprint and transformed-player behavior are not qualified."
     },
     {
@@ -48,7 +48,7 @@
       "name": "MAPSENSE_CollisionSizeTwoPatternWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 20-byte size-two branch witness calls 0x366920 from 0x364DE0. The dispatcher at 0x364D89 selects this branch for size two; sizes zero/one use a point and size three a different pattern. Unique slow-path witnesses 0x366C4C, 0x366C76 and 0x366CA3 test centre plus four cardinal neighbours and OR their masked collisions. This disproves a single-cell placement model for a player; it does not qualify every fast-path or border behavior for runtime use."
     },
     {
@@ -56,7 +56,7 @@
       "name": "MAPSENSE_RoomCoordinateListLookupWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
+      "source": "workspace:plugin-dev/mapsense/mission.md; scripts/reverse-engineering/mapsense-gps-native-audit.js",
       "notes": "Unique 33-byte loop witness in null-safe coordinate lookup 0x38DFB0. The caller first tests the supplied room, then obtains its room vector/count through CALL 0x38DFFA -> governed DUNGEON_GetRoomListAndCount at 0x2EFDE0 and tests entries using 0x2F0680. Bounds use ActiveRoom+0x80/+0x84 and +0x88/+0x8C, minimum inclusive, maximum exclusive. This adds a relocation consumer for the existing room-list accessor; list construction, exact membership and equivalence to generated near-room links remain unproven."
     },
     {
@@ -208,7 +208,7 @@
       "name": "PATH_GetRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Returns the ActiveRoom pointer stored at dynamic-path offset +0x20. UNITS_GetRoom tail-jumps here for player units; MapSense 0.9.3 validates this five-byte body as part of the current-level witness chain. The signature 48 8B 41 20 C3 is unique in the governed 92777 corpus reused for target 3.3.93847."
     },
     {
@@ -216,7 +216,7 @@
       "name": "UNITS_GetObjectInteractType",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Null-safe object accessor with ABI (Unit*) -> uint8. Its strict unique 72-byte body requires Unit type 2, loads ObjectData* from Unit+0x10, then returns the byte at ObjectData+0x08. Its 28 direct readers include only three client paths: 0x9A39E tests the sign bit for object-lock behavior, 0x1CB118 feeds the shrine-record resolver, and 0xC1882 alone feeds DATATBLS_GetLevelsTxtRecord at client UI callsite 0xC188E. Native chest consumers split this byte into lock bit 0x80 and trap type bits 0..6; MapSense fingerprints both the entry and the complete valid layout path before consuming it. The body is byte-identical in the governed common corpus for targets 92777 and 93847."
     },
     {
@@ -224,7 +224,7 @@
       "name": "OBJECTS_IsShrine",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Predicate with ABI (Unit*) -> int32. Its strict unique 30-byte body requires Unit type 2, follows Unit+0x10 to ObjectData and its active compiled ObjectsTxt record, then tests SubClass bit 0x01 at record+0x127. This is the generic runtime shrine classifier and does not depend on a vanilla or BKVince object-ID allowlist."
     },
     {
@@ -288,7 +288,7 @@
       "name": "UNITS_GetSuperUniqueIndex",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Null-safe accessor with ABI (Unit*) -> int32. Its complete strict unique 92-byte body validates Unit type 1 twice, loads MonsterData* from Unit+0x10, returns the uint16 SuperUniques row index at MonsterData+0x2A, and returns -1 on null, wrong type or missing data. MapSense fingerprints all 92 bytes so the second type gate and full success/failure paths are covered before resolving the index against the active mod SuperUniques table and localization."
     },
     {
@@ -320,7 +320,7 @@
       "name": "ACTIVEROOM_GetDrlgRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Leaf accessor with ABI (ActiveRoom*) -> DrlgRoom*. Its complete body returns ActiveRoom+0x18 and is followed by an aligned trap padding run. MapSense calls it in Navigation and fingerprints the same strict 16-byte body-plus-padding witness in both the monster-marker and POI current-level chains before either path directly consumes ActiveRoom+0x18. The witness is unique in the governed common corpus for targets 92777 and 93847."
     },
     {
@@ -328,7 +328,7 @@
       "name": "DRLGROOM_GetLevelId",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Returns the levelId through DrlgRoom+0x90 (Level*) and Level+0x1F8. MapSense 0.9.3 uses the same proven field chain after UNITS_GetRoom and ActiveRoom+0x18 to invalidate stale navigation immediately on a level transition. Its complete 14-byte body is unique in the governed 92777 corpus shared with target 3.3.93847."
     },
     {
@@ -336,7 +336,7 @@
       "name": "DRLGWARP_ResolveRoomTileLink",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "ABI (uint8 dataContext, DrlgRoom* sourceRoom, int32 sourcePresetId, int32* outReciprocalPresetId, LvlWarpTxt** outReciprocalLvlWarpTxt) -> ActiveRoom*. Initializes the source room, matches sourcePresetId against RoomTile+0x20 (LvlWarpTxt*) +0x2C in the source RoomTile chain at +0x78, follows RoomTile+0x00 to the destination DrlgRoom, validates the reciprocal RoomTile, writes the reciprocal LvlWarp identifier and record pointer, initializes the destination room when needed, and returns its ActiveRoom; unresolved reciprocal links return null. The wrapper at 0x361070 converts the returned ActiveRoom through +0x18, DrlgRoom+0x90 and Level+0x1F8 into the destination LevelId. MapSense 0.9.4 called this resolver on the UI thread. Live 0.9.9 diagnostics proved that its reciprocal requirement rejects valid lazy source-side links in Tamoe Highland, Barracks, and Jail Level 1. MapSense 0.10.0 therefore materializes each source room and reads the already-valid destination DrlgRoom directly from RoomTile+0x00; the independent 15-byte witness at 0x3DA9FB proves RoomTile+0x00, destination DrlgRoom+0x78, and reciprocal RoomTile+0x00. The 27-byte entry signature 48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 41 56 48 83 EC 20 4D 8B F1 41 8B F8 is unique in the governed common corpus."
     },
     {
@@ -344,7 +344,7 @@
       "name": "DRLGROOM_FindWaypointRoomAndCoordinates",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "ABI (uint8 dataContext, Level* level, int32* outTileX, int32* outTileY) -> DrlgRoom*. Iterates Level+0x10 rooms, selects a room whose +0x50 flags intersect 0x30000, initializes it, then scans PresetUnit type 2 objects whose ObjectsTxt SubClass byte at +0x127 carries 0x40. On an exact waypoint match it writes room tile coordinates plus preset-relative coordinates divided by five; native callers initialize both outputs to -1 and fall back to the room center if either remains unset. MapSense 0.9.4 accepts only an exact non-null result with valid outputs, converts game tiles to world subtiles, and publishes no room-center or first-preset fallback. The 18-byte entry signature 48 89 6C 24 18 57 41 56 41 57 48 83 EC 20 48 8B 7A 10 is unique in the governed common corpus."
     },
     {
@@ -352,7 +352,7 @@
       "name": "DRLG_GetLevel",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Resolves a Level with ABI (uint8 dataContext, Drlg*, int32 levelId) -> Level*. It traverses Drlg+0x868 through Level+0x1B8 and compares Level+0x1F8, but allocates and links a new Level when the target is absent. Native consumers pair it with DRLG_InitLevel when Level+0x10 is null. Since MapSense 0.9.9, Reveal owns the fingerprinted helper used by Navigation to resolve levels inside the captured client DRLG. MapSense 0.10.0 initializes only the explicit progression target and configured custom targets present in the current Level's eight Vis slots before source RoomTile enumeration; unavailable targets remain pending and never produce guessed lines."
     },
     {
@@ -360,7 +360,7 @@
       "name": "DRLG_InitLevel",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Initializes the room chain of a Level with ABI (uint8 dataContext, Level*) -> void. A native consumer at 0x3DD5E3 first checks Level+0x10. Since MapSense 0.9.9, Reveal owns the strictly fingerprinted call and invokes it only when Level+0x10 is null. MapSense 0.10.0 reuses that governed helper for the explicit progression target and configured custom targets present in the current Level's eight Vis slots before reading source RoomTile links."
     },
     {
@@ -368,7 +368,7 @@
       "name": "DRLGROOM_GetPresetUnits",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Returns DrlgRoom+0x98 after checking room flag bits 18 and 26, and may set bit 26. MapSense avoids this mutation and reads +0x98 directly after proving that the current active Level already owns the room chain. The complete strict signature through the trailing return is unique."
     },
     {
@@ -376,7 +376,7 @@
       "name": "DRLGROOM_RebuildNearRoomVector",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "ABI (DrlgRoom*) -> void. Clears the vector size at DrlgRoom+0x18, iterates the owning Level+0x10 room chain through DrlgRoom+0x48, compares rectangle fields +0x60/+0x64/+0x68/+0x6C, appends qualifying room pointers through the vector at +0x10/+0x18/+0x20 and sorts them. MapSense 0.9.5 does not invoke this mutating routine because later DRLG linkage can add cross-level neighbours; it uses three strict interior witnesses from this function to prove the existing near-room vector layout before passively enumerating outdoor inter-level boundaries."
     },
     {
@@ -384,7 +384,7 @@
       "name": "CLIENT_GetUnitByIdAndType",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/floating-damage-portage-3.2.md; Mission/ruffneckk-mapsense.md",
+      "source": "Mission/floating-damage-portage-3.2.md; workspace:plugin-dev/mapsense/mission.md",
       "notes": "Resolves a client unit with ABI (unitId in ECX, unitType in EDX) -> Unit*. Packet handler 0x60 calls it with GUID packet+3 and unit type 2 before updating the portal object; the native caller at 0x198D66 independently loads a packet type byte and unit id. Its entry proves the client hash-table base at 0x2A23910, 128 buckets per unit type through mask 0x7F, and a 0x400-byte type stride. Its strict 33-byte entry signature is unique in the common corpus and differs from the adjacent server-unit lookup at 0x9A5A0 by its backing table and tail displacement. A client portal sidecar can use this resolver only for immediate class/GUID/low-byte revalidation and must never retain the returned Unit pointer. Floating Damage 1.2.8 and MapSense 0.12.0 already obey the same no-retained-pointer constraint."
     },
     {
@@ -392,7 +392,7 @@
       "name": "SERVER_GetUnitByIdAndType",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; D2R.exe governed common corpus 3.2.92777/3.3.93847",
+      "source": "workspace:plugin-dev/mapsense/mission.md; D2R.exe governed common corpus 3.2.92777/3.3.93847",
       "notes": "Resolves a server unit with ABI (unitId in ECX, unitType in EDX) -> Unit*. Its unique strict 28-byte entry signature resolves the server Unit hash-table base at 0x2A25110, applies the same 128-bucket mask and 0x400-byte type stride as the adjacent client resolver, then tail-jumps to CLIENT_FindUnitInTypeBucket. The native missile consumer at 0x3B7D0E selects this resolver for unit type 3 when UNITS_IsServerUnit@0x34F8D0 is true and otherwise selects CLIENT_GetUnitByIdAndType. MapSense fingerprints this relationship before any bounded read-only server missile traversal."
     },
     {
@@ -400,7 +400,7 @@
       "name": "CLIENT_FindUnitInTypeBucket",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Client hash-chain lookup witness. It loads one bucket head, compares Unit+0x08 to the requested id and Unit+0x00 to the requested type, and advances through Unit+0x158 until a match or null. MapSense 0.12.0 fingerprints the complete 41-byte helper and uses only the proven +0x158 next-link layout for bounded read-only traversal of the monster table."
     },
     {
@@ -408,7 +408,7 @@
       "name": "CLIENT_UnitHashTable",
       "kind": "data",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; CLIENT_GetUnitByIdAndType@0x9A5D0; CLIENT_FindUnitInTypeBucket@0x9F270",
+      "source": "workspace:plugin-dev/mapsense/mission.md; CLIENT_GetUnitByIdAndType@0x9A5D0; CLIENT_FindUnitInTypeBucket@0x9F270",
       "notes": "Base of the client Unit hash table. Each unit type owns 128 pointer buckets (0x400 bytes), so monster type 1 begins at +0x400 and missile type 3 begins at +0xC00. MapSense 0.12.0 reads the monster buckets while the local-player automap pass is active; its dual-source missile collector reads the client type-3 buckets first and gives those value copies priority over matching server identities. Both paths follow the separately witnessed Unit+0x158 link, enforce per-bucket and total traversal caps and retain no native Unit pointer."
     },
     {
@@ -416,7 +416,7 @@
       "name": "SERVER_UnitHashTable",
       "kind": "data",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; SERVER_GetUnitByIdAndType@0x9A5A0; CLIENT_FindUnitInTypeBucket@0x9F270",
+      "source": "workspace:plugin-dev/mapsense/mission.md; SERVER_GetUnitByIdAndType@0x9A5A0; CLIENT_FindUnitInTypeBucket@0x9F270",
       "notes": "Base of the server Unit hash table, exactly 0x1800 bytes after CLIENT_UnitHashTable: six client unit-type arrays of 128 pointers each precede it. SERVER_GetUnitByIdAndType proves the base, mask 0x7F and 0x400-byte type stride, placing server missiles at +0xC00 (D2R+0x2A25D10). A read-only runtime witness in Act IV observed zero client missiles and 11 then 15 valid server type-3 units with valid ids, classes and dynamic paths. MapSense scans this table only after its strict resolver fingerprint passes, deduplicates by unit id with class consistency, prefers client copies and retains no native pointer."
     },
     {
@@ -424,7 +424,7 @@
       "name": "UNITS_MissileTypeAndDataWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; D2R.exe governed common corpus 3.2.92777/3.3.93847",
+      "source": "workspace:plugin-dev/mapsense/mission.md; D2R.exe governed common corpus 3.2.92777/3.3.93847",
       "notes": "Unique strict 32-byte witness 40 53 83 39 03 4D 8B D0 48 8B D9 0F 85 59 01 00 00 4C 8B 49 18 48 8D 05 30 EC 91 01 48 89 7C 24. It requires Unit+0x00 to equal 3 before entering its missile-data path and reading the type-specific pointer at Unit+0x18. Combined with CLIENT_GetUnitByIdAndType and CLIENT_FindUnitInTypeBucket, it proves that client hash-table unit type 3 is the missile family used by MapSense's read-only collector; broader semantics of the function remain unnamed."
     },
     {
@@ -432,7 +432,7 @@
       "name": "DRLG_GetHoradricStaffTombLevelId",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; D2MOO@3b21043b99e987bad41cf0f7b49f1f246db52d5c:source/D2Common/src/Drlg/DrlgDrlg.cpp",
+      "source": "workspace:plugin-dev/mapsense/mission.md; D2MOO@3b21043b99e987bad41cf0f7b49f1f246db52d5c:source/D2Common/src/Drlg/DrlgDrlg.cpp",
       "notes": "Returns Drlg+0x120 or zero for a null DRLG with observed ABI (Drlg*) -> int32. D2MOO supplies semantic provenance for nStaffTombLevel only; the x64 RVA, entry bytes and layout witness come from the governed common D2R corpus. MapSense 0.12.0 accepts only Tal Rasha tomb level ids 66 through 72 and resolves that exact RoomTile exit in the Canyon of the Magi."
     },
     {
@@ -440,7 +440,7 @@
       "name": "QUESTRECORD_GetQuestState",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; D2MOO@3b21043b99e987bad41cf0f7b49f1f246db52d5c:source/D2Common/src/D2QuestRecord.cpp",
+      "source": "workspace:plugin-dev/mapsense/mission.md; D2MOO@3b21043b99e987bad41cf0f7b49f1f246db52d5c:source/D2Common/src/D2QuestRecord.cpp",
       "notes": "Reads one synchronized quest-record bit with observed x64 ABI (questRecord, questIndex, stateIndex) -> bool. D2MOO supplies the semantic bit formula and identifies QUESTSTATEFLAG_A2Q6 as 14 and QFLAG_REWARDGRANTED as 0; no 32-bit address or ABI is transplanted. MapSense 0.12.0 calls the strictly fingerprinted x64 function only for a non-null current-difficulty client record."
     },
     {
@@ -448,7 +448,7 @@
       "name": "CLIENT_CurrentDifficultyQuestRecord",
       "kind": "data",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; client witness 0x114C20",
+      "source": "workspace:plugin-dev/mapsense/mission.md; client witness 0x114C20",
       "notes": "Pointer to the synchronized client quest record for the current difficulty. The unique witness at 0x114C20 loads this pointer through RIP-relative addressing immediately before QUESTRECORD_GetQuestState. MapSense 0.12.0 fingerprints that full caller witness, rejects a null or unaligned record and reads only Act II quest 6 RewardGranted to choose red quest versus green farming navigation."
     },
     {
@@ -3024,7 +3024,7 @@
       "name": "UNITS_GetRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/prevent-merc-death-in-town-3.2.md; Mission/ruffneckk-mapsense.md",
+      "source": "Mission/prevent-merc-death-in-town-3.2.md; workspace:plugin-dev/mapsense/mission.md",
       "notes": "Returns the active room for a unit through its path representation. D2GAME_MONSTER_ApplyStatRegen passes this result directly to DUNGEON_IsRoomInTown before suppressing a low-life negative tick. MapSense fingerprints the strict unique 32-byte entry plus the unique 36-byte type-branch/layout witness at 0x34B461 in both its monster-marker and POI current-level chains before calling the function."
     },
     {
@@ -3376,7 +3376,7 @@
       "name": "UI_InterfaceStateTable",
       "kind": "data",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; Mission/remote-stash-3.2.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; Mission/remote-stash-3.2.md",
       "notes": "Governed array of 32 native UI-state bytes. UI_OpenInterfaceState reads state[RBX] at 0xCD7FB, UI_ToggleInterfaceState reads the same indexed byte at 0xCDE3C, and UI_CloseInterfaceState first proves RBX < 0x20 then writes zero at 0xC7DF1. These three independent instruction-aligned witnesses all encode RVA 0x2A2ADA0. MapSense 0.13.2 reads only a copied 32-byte snapshot and suppresses every MapSense-owned pixel and input bound when a modal/panel state is active; it neither hooks nor writes this table."
     },
     {
@@ -3384,7 +3384,7 @@
       "name": "UI_OpenInterfaceStateTableReadWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Exact nine-byte MOVZX at UI_OpenInterfaceState+0x3B reading byte ptr [moduleBase + state + 0x2A2ADA0]. MapSense fingerprints this internal witness instead of the function prologue, which RemoteStash may legitimately own through an inline hook in the complete plugin stack."
     },
     {
@@ -3392,7 +3392,7 @@
       "name": "UI_CloseInterfaceStateTableWriteWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Exact 19-byte sequence comparing the signed state index to 0x20, rejecting out-of-range values, then writing zero to UI_InterfaceStateTable[state]. It proves the 32-entry bound and byte semantics consumed read-only by MapSense."
     },
     {
@@ -3400,7 +3400,7 @@
       "name": "UI_ToggleInterfaceStateTableReadWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Exact nine-byte MOVZX at UI_ToggleInterfaceState+0x3C independently reading byte ptr [moduleBase + state + 0x2A2ADA0]. It cross-checks the table address without consuming or conflicting with RemoteStash's hookable UI-state entrypoints."
     },
     {
@@ -3680,7 +3680,7 @@
       "name": "DATATBLS_GetObjectsTxtRecordCount",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Returns dataTables+0x1530 with ABI (uint8 dataContext) -> int32. MapSense calls it before DATATBLS_GetObjectsTxtRecord so every waypoint object class id is bounds-checked. Its strict 20-byte signature 48 83 EC 28 E8 17 0E F7 FF 8B 80 30 15 00 00 48 83 C4 28 C3 is unique in the governed corpus."
     },
     {
@@ -4984,7 +4984,7 @@
       "name": "DATATBLS_GetLevelDefRecord",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Returns the 0x9C-byte Levels record for the requested data context and LevelId with observed ABI (uint8 dataContext, int32 levelId) -> LevelDef*. It validates the data-context table and row bounds, returns null on failure and exposes the native automap Layer at record+0x08. The standard automap callback 0xD2240 passes that value to AUTOMAP_GetOrCreateLayer. Its strict 32-byte entry signature is unique in the governed common corpus."
     },
     {
@@ -4992,7 +4992,7 @@
       "name": "COORD_ConvertGameTileToAutomap",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "In-place integer conversion with observed ABI (int32* tileX, int32* tileY) -> void. It computes X=80*(tileX-tileY) and Y=40*(tileX+tileY); AUTOMAP_BuildTileCell then divides both by ten before inserting the cell, yielding the persisted automap basis (tileX-tileY)*8 and (tileX+tileY)*4. Its strict 32-byte body is unique in the governed common corpus."
     },
     {
@@ -5000,7 +5000,7 @@
       "name": "AUTOMAP_InsertCell",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Native deduplicating tree insertion with observed ABI (AutomapCellTree*, InsertResult*, const AutomapCellKey*) -> InsertResult*. The key is 12 bytes {uint16 tag, int16 frame, int32 x, int32 y}. A missing key allocates one 0x30-byte node through D2R's allocator, copies the payload to node+0x20, increments tree+0x20 and balances through 0xA8EF0; an existing key allocates nothing. The comparator ignores tag and orders by Y, X and frame. D2R's sidecar loader calls this function with tag 1 at 0xD5C6F. Its strict 32-byte entry signature is unique."
     },
     {
@@ -5008,7 +5008,7 @@
       "name": "AUTOMAP_FindCellInsertionPoint",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Searches an automap cell tree with observed ABI (AutomapCellTree*, FindResult*, const AutomapCellKey*) -> FindResult*. FindResult is 16 bytes {node, insertionSlot}: insertionSlot is null for an existing key and otherwise points to the parent child-link where AUTOMAP_InsertCell will allocate. Ordering compares Y at key+0x08, X at +0x04 and then the signed frame at +0x02 through D2R's native frame-priority table. Its only direct caller is 0xD1460 and its strict 32-byte entry signature is unique. MapSense uses this exact preflight to let duplicates pass without mutation even when the tree's total node count is large."
     },
     {
@@ -5016,7 +5016,7 @@
       "name": "AUTOMAP_BuildTileCell",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Builds one native automap floor or wall cell with observed ABI (uint8 dataContext, TileRecord*, DrlgRoom*, AutomapCellTree*) -> void. It sets tile flag bit 18 once, resolves the automap frame, adds the room origin to tile coordinates, applies COORD_ConvertGameTileToAutomap and the native divide-by-ten, adds 24 to Y for orientations >=0x10, then calls AUTOMAP_InsertCell. Its strict 32-byte entry signature is unique."
     },
     {
@@ -5024,7 +5024,7 @@
       "name": "AUTOMAP_GetOrCreateLayer",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Returns the native owner for one Levels.Layer id, creating a 0xB0-byte owner when absent. The owner contains four 0x28-byte cell trees at +0x08, +0x30, +0x58 and +0x80 and a linked-list pointer at +0xA8. A foreign target enters the 0xD1710 layer-switch path, which serializes the current trees through 0xD6230 and frees their nodes through 0xD4D60 before changing the owner. MapSense therefore treats this function as a byte witness only and never calls it. Its strict 32-byte entry signature is unique."
     },
     {
@@ -5032,7 +5032,7 @@
       "name": "AUTOMAP_SerializeLayerOwner",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Serializes the currently active automap layer owner during the native 0xD1710 layer-switch path and delegates its cell trees to AUTOMAP_SerializeCellTree 0xD7CE0 before their nodes are freed. The 2026-09-01 MapSense transition crash occurred inside this path before the Act III owner could be replaced."
     },
     {
@@ -5040,7 +5040,7 @@
       "name": "AUTOMAP_SerializeCellTree",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Walks one native automap cell tree but skips a node when the first byte of its key at node+0x20 is nonzero. Each emitted zero-tag key contributes three uint16 values (frame, X and Y), exactly six bytes. Its exact epilogue witness at 0xD7E3F doubles the output container's uint16 element count and sign-extends it; therefore the safe bound is 5461 emitted zero-tag records, not 5461 total tree nodes. The crash witness RBP=0xFFFFB118 corresponds exactly to 7556 emitted MapSense keys * 6 = 45336 = 0xB118 and was later consumed as an oversized copy length."
     },
     {
@@ -5048,7 +5048,7 @@
       "name": "AUTOMAP_SerializeCellTree_SignedByteCountWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Exact unique 13-byte serializer epilogue (0F B7 4E 08 66 03 C9 0F BF C9 41 89 0F). It reads the output container's uint16 emitted-element count at +0x08, doubles it in 16 bits and sign-extends the resulting byte count. Combined with three uint16 values per emitted zero-tag record, it proves a 5461-record bound for that emitted subset; it does not bound the tree+0x20 total node count. The byte sequence is unique in .text for the governed common corpus."
     },
     {
@@ -5056,7 +5056,7 @@
       "name": "AUTOMAP_LoadSerializedCell_RestoredTagWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Within the native automap sidecar loader, the exact sequence at 0xD5C3E..0xD5C75 copies serialized frame/X/Y into a 12-byte AutomapCellKey, writes uint16 tag 1 at key+0x00, and calls AUTOMAP_InsertCell 0xD1460. This proves tag-1 keys are the native representation of restored cells accepted by the ordinary renderer tree, while AUTOMAP_SerializeCellTree later skips their nonzero low tag byte."
     },
     {
@@ -5064,7 +5064,7 @@
       "name": "AUTOMAP_CurrentLayerOwner",
       "kind": "data",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Pointer to D2R's currently active 0xB0-byte automap layer owner. The governed witness at 0xD541E compares a candidate owner against this exact global and enters the destructive 0xD1710 switch path when they differ; 0xD1710 then reads the same global before serializing and freeing its four trees. MapSense reads this pointer only on D2R's UI thread after exact byte/layout witnesses, requires owner+0x00 to equal the current level's authoritative Levels.Layer, never writes or switches it and never retains it beyond one bounded pump."
     },
     {
@@ -5072,7 +5072,7 @@
       "name": "AUTOMAP_RevealActiveRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Reveals one ActiveRoom into a supplied layer owner with observed ABI (uint8 dataContext, ActiveRoom*, int32 revealEntireRoom, AutomapLayerOwner*) -> void. It sends the 0x48-stride floor and wall tile arrays to AUTOMAP_BuildTileCell using owner+0x08 and owner+0x30, then sends admissible object units to owner+0x58. Its only direct caller is the standard callback 0xD2240 and its strict 32-byte entry signature is unique."
     },
     {
@@ -5080,7 +5080,7 @@
       "name": "AUTOMAP_ProjectClientCoordinatesToScreen",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Projects packed client/dimetric X/Y into the native automap context's screen-coordinate system with observed ABI (AutomapContext*, packedXYOut*, packedClientXY) -> packedXYOut*. AUTOMAP_RenderUnit supplies the coordinates returned by 0x34AF60/0x34AFB0, whose active-path reads are Path+0x08/+0x0C. World subtiles at Path+0x10/+0x14 must first be converted by 0x334E00. The caller at 0xD7750 clips the result against context+0x18/+0x1C/+0x20/+0x24. Its strict 32-byte entry signature is unique in the governed corpus common to D2R 3.2.92777 and 3.3.93847."
     },
     {
@@ -5088,7 +5088,7 @@
       "name": "AUTOMAP_RenderUnit",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Per-unit native automap renderer with observed ABI (Unit*, AutomapContext*) -> void. It resolves client/dimetric unit coordinates through 0x34AF60/0x34AFB0, projects them through 0xD4910, applies the native context clip and draws the unit icon. The strict 32-byte entry signature is unique. MapSense calls the original exactly once before its bounded observation and stores no D2R pointer outside the hook. No competing owner was found in the pinned eezstreet PluginPack."
     },
     {
@@ -5096,7 +5096,7 @@
       "name": "UNITS_GetUnitMode",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Returns the 32-bit mode at Unit+0x0C, or zero for a null unit. Its strict 43-byte entry signature includes both the guarded null path and the non-null field read and is unique in the governed corpus. MapSense uses it to reject monster death mode 0 and dead mode 12; those mode meanings remain subject to the gameplay witness."
     },
     {
@@ -5104,7 +5104,7 @@
       "name": "UNITS_GetClientCoordX",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Returns the current integer client/dimetric X coordinate for a Unit from the applicable static or dynamic Path. AUTOMAP_RenderUnit calls it immediately before 0x34AFB0 and AUTOMAP_ProjectClientCoordinatesToScreen. Its strict 32-byte entry signature is unique in the governed corpus. MapSense 0.9.8 uses this value unchanged for the active waypoint Unit instead of reprojecting its generation preset."
     },
     {
@@ -5112,7 +5112,7 @@
       "name": "UNITS_GetClientCoordY",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Returns the current integer client/dimetric Y coordinate for a Unit from the applicable static or dynamic Path. AUTOMAP_RenderUnit calls it after 0x34AF60 and before AUTOMAP_ProjectClientCoordinatesToScreen. Its strict 32-byte entry signature is unique in the governed corpus. MapSense 0.9.8 uses this value unchanged for the active waypoint Unit instead of reprojecting its generation preset."
     },
     {
@@ -5120,7 +5120,7 @@
       "name": "PATH_ConvertSubtileToClientCoordinates",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "In-place integer conversion (subtileX*, subtileY*) -> client/dimetric coordinates. Its governed body computes clientX = 16 * (subtileX - subtileY) and clientY = 8 * (subtileX + subtileY). MapSense 0.9.8 reproduces this checked arithmetic for immutable subtile destinations, while active waypoint Units retain their authoritative native client pair unchanged."
     },
     {
@@ -5128,7 +5128,7 @@
       "name": "COORD_ConvertGameTileToSubtile",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "In-place integer conversion multiplying both game-tile coordinates by five. MapSense uses the proven scale in checked local arithmetic for preset validation and collision-grid geometry."
     },
     {
@@ -5136,7 +5136,7 @@
       "name": "DUNGEON_GetCollisionGridFromRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Confirmed-static one-argument ActiveRoom collision-grid accessor. It returns ActiveRoom+0x38; its strict 32-byte signature is unique in the governed common corpus. The independent witnesses at 0x36697B and 0x3669E6 prove the grid fields used by MapSense 0.9.8: origin X/Y at +0/+4, width/height at +8/+0x0C and uint16 cell pointer at +0x20."
     },
     {
@@ -5144,7 +5144,7 @@
       "name": "DRLGLEVEL_GetVisArray",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Pure wrapper with observed ABI (uint8 dataContext, Level*) -> int32_t* that loads Level+0x1F8 and Level+0x1C8, then delegates to 0x360800. The core returns the dynamic Drlg+0x118 node's Vis[8] array at +0x04 when present, otherwise LevelsTxt+0x48. Its strict 19-byte body is fingerprinted by MapSense 0.9.8."
     },
     {
@@ -5152,7 +5152,7 @@
       "name": "DRLGLEVEL_GetWarpId",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Read-only accessor with observed ABI (uint8 dataContext, Level*, uint8 slot) -> int32. It returns Warp[slot] from the dynamic Drlg+0x118 node at +0x24 when present, otherwise LevelsTxt+0x68. MapSense 0.9.8 accepts only reciprocal direct-outdoor links whose source and target Warp values are -1."
     },
     {
@@ -5160,7 +5160,7 @@
       "name": "DRLGROOM_LinkDirectOutdoorRooms",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Native mutating room-linker used as a semantic/layout witness only. For Warp=-1 it requires the target room reciprocal visibility bit 1 << (slot+4) and accepts source/target rectangles only when the computed gap is below six game tiles on both axes, then inserts into the source near-room vector through 0x3612E0. MapSense 0.9.8 uses the read-only reciprocal topology only to select candidate room pairs, then derives the endpoint from an already-active source collision grid; it never calls this mutating function."
     },
     {
@@ -5168,7 +5168,7 @@
       "name": "PATH_PlayerCollisionMaskWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Unique 61-byte native witness that passes collision mask 0x1C09 while evaluating a player path. The mask combines WALL 0x0001, NOPLAYER 0x0008, OBJECT 0x0400, DOOR 0x0800 and NO_PATH 0x1000. MapSense 0.12.3 fingerprints this exact witness and accepts an outdoor seam only when the edge and one interior subtile on both linked rooms are open under the complete player-path mask."
     },
     {
@@ -5176,7 +5176,7 @@
       "name": "DRLGOUTDOORS_MonasteryGateAnchorWitness",
       "kind": "layout-witness",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md",
       "notes": "Unique 60-byte native witness inside the outdoor path builder. For adjacent LevelId 26 it reads the target Level game-tile origin at +0x24/+0x28 and emits the fixed Monastery Gate anchor (originX+27, originY+13). MapSense 0.12.3 fingerprints the complete sequence and uses this native anchor for Tamoe Highland to Monastery Gate instead of selecting a collision opening on the decorative facade."
     },
     {
@@ -5192,7 +5192,7 @@
       "name": "MonsterDataRankFlagsWitness",
       "kind": "branch-site",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Unique 27-byte native witness that verifies unit type 1, loads MonsterData* from Unit+0x10 and tests rank flags at MonsterData+0x1A with mask 0x0E. This proves the super-unique, champion and unique flag group used by MapSense. The separate minion bit 0x10 remains historically corroborated rather than proven by this exact witness, so rejecting it from the normal category is conservative."
     },
     {
@@ -6560,7 +6560,7 @@
       "name": "DRLGROOM_BuildRoomAndActiveRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. The strict pipeline witness at +0x0F conditionally calls 0x3608A0, calls static grid initializer 0x3F38D0 and static map-tile builder 0x3F3930, then separately calls ActiveRoom allocator 0x326480. MapSense 0.13.21 fingerprints this control flow but deliberately calls only the static phases for distant POI descriptors."
     },
     {
@@ -6568,7 +6568,7 @@
       "name": "ACTIVEROOM_AllocateForDrlgRoom",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "ActiveRoom allocator called only after DRLGROOM_BuildRoomAndActiveRoom has completed the static room phases. MapSense 0.13.21 uses this RVA only as a negative control-flow witness and never resolves or calls it from passive distant-name capture."
     },
     {
@@ -6576,7 +6576,7 @@
       "name": "DRLGROOM_BuildNearRoomLinks",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. DRLGROOM_BuildRoomAndActiveRoom calls it only when the room's near-room vector state at +0x18 is zero; the function first delegates to the governed near-room-vector builder at 0x3614C0 and completes static room-link preparation."
     },
     {
@@ -6584,7 +6584,7 @@
       "name": "DRLGPRESET_AddPresetUnitDescriptors",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md; D2MOO semantic reference",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md; D2MOO semantic reference",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. DRLGROOM_CreateActiveRoom calls it for room type 2 when DrlgRoom flag bit 25 is clear. It materializes static PresetUnit descriptors used by exact waypoint discovery; MapSense never traverses or creates gameplay Unit or monster instances in this path."
     },
     {
@@ -6592,7 +6592,7 @@
       "name": "DRLGROOM_InitializeStaticRoomGrids",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. This is the first unconditional static phase in DRLGROOM_BuildRoomAndActiveRoom and precedes both static map-tile generation and the separate ActiveRoom allocation."
     },
     {
@@ -6600,7 +6600,7 @@
       "name": "DRLGROOM_AddStaticMapTiles",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. Dispatches by room type, creates static map-tile/RoomTile state and sets DrlgRoom HAS_ROOM bit 20. It returns before ActiveRoom allocation, allowing MapSense 0.13.21 to copy exact exit and waypoint descriptors without loading live room units."
     },
     {
@@ -6608,7 +6608,7 @@
       "name": "DRLGROOM_LoadTileLibraries",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (uint8 dataContext, DrlgRoom*) -> void. DRLGROOM_CreateActiveRoom calls it only when DrlgRoom flag bit 24 is clear; completion sets that tile-library-loaded bit before preset and static-room phases."
     },
     {
@@ -6616,7 +6616,7 @@
       "name": "DRLGROOM_ReleaseRoomData",
       "kind": "function",
       "confidence": "high",
-      "source": "Mission/ruffneckk-mapsense.md; reverse-engineering/d2r-3.2.92777/findings.md",
+      "source": "workspace:plugin-dev/mapsense/mission.md; reverse-engineering/d2r-3.2.92777/findings.md",
       "notes": "Observed Windows x64 ABI (DrlgRoom*, int32 keepRoom) -> void. With keepRoom=0 it clears DrlgRoom+0x58, tests and clears HAS_ROOM bit 20, and releases transient static room grids while retaining the lightweight descriptor chains required by normal DRLG lifecycle. MapSense calls it only for a static lease it created and only while +0x58 remains null."
     },
     {
