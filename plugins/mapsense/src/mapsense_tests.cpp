@@ -4,6 +4,8 @@
 #include "external_atlas_cache.hpp"
 #include "external_atlas_geometry.hpp"
 #include "external_label_provider.hpp"
+#include "gps_route_artifact.hpp"
+#include "gps_route_coordinator_policy.hpp"
 #include "mapsense_config.hpp"
 #include "mapsense_data_catalog.hpp"
 #include "navigation_engine.hpp"
@@ -24,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include <algorithm>
 #include <array>
@@ -277,10 +280,24 @@ auto __cdecl FakeCatalogGetStringByKey(
     return D2RL::Localization::Result::Success;
 }
 
+auto __cdecl FakeCatalogGetStringById(
+        const D2RL::PluginContext*,
+        std::uint32_t,
+        char*,
+        std::uint32_t,
+        std::uint32_t* requiredSize) noexcept
+        -> D2RL::Localization::Result {
+    if (requiredSize == nullptr) {
+        return D2RL::Localization::Result::InvalidArgument;
+    }
+    *requiredSize = 0U;
+    return D2RL::Localization::Result::NotFound;
+}
+
 const D2RL::LocalizationServiceV1 FakeCatalogLocalizationService{
     .serviceSize = D2RL::LocalizationServiceV1Size,
     .serviceVersion = D2RL::LocalizationServiceV1Version,
-    .getStringById = nullptr,
+    .getStringById = FakeCatalogGetStringById,
     .getStringByKey = FakeCatalogGetStringByKey,
 };
 
@@ -528,7 +545,20 @@ void CheckMapSenseDataCatalogContract() {
             CHECK(result.catalog->AllFamiliesAvailable());
             CHECK(result.catalog->ActiveExcelDirectories().size() == 2U);
             CHECK(result.catalog->ActiveTileDirectories().size() == 2U);
+            CHECK(result.catalog->AtlasExcelDirectories().size() == 2U);
+            CHECK(result.catalog->AtlasExcelDirectories()[0] == activeExcel);
+            CHECK(result.catalog->AtlasExcelDirectories()[1] == vanillaExcel);
             CHECK(result.catalog->AtlasDataFingerprint() != 0U);
+            const auto initialAtlasFingerprint =
+                result.catalog->AtlasDataFingerprint();
+            WriteCatalogFixture(
+                vanillaExcel / "lvlprest.txt",
+                "Name\tDef\r\nAct 5 fallback\t1\r\n");
+            const auto fallbackChanged =
+                MapSenseDataCatalog::Load(&context, options);
+            CHECK(fallbackChanged);
+            CHECK(fallbackChanged.catalog->AtlasDataFingerprint()
+                != initialAtlasFingerprint);
             for (std::size_t familyIndex = 0U;
                     familyIndex < result.catalog->FamilyStatuses().size();
                     ++familyIndex) {
@@ -631,6 +661,7 @@ void CheckMapSenseDataCatalogContract() {
             CHECK(result.catalog->AllFamiliesAvailable());
             CHECK(result.catalog->ActiveExcelDirectories().empty());
             CHECK(result.catalog->ActiveTileDirectories().empty());
+            CHECK(result.catalog->AtlasExcelDirectories().empty());
             CHECK(result.catalog->AtlasDataFingerprint() == 0U);
             for (const auto& status : result.catalog->FamilyStatuses()) {
                 CHECK(status.state
@@ -904,6 +935,23 @@ auto ProjectNavigationClientIdentity(
         std::int32_t clientX,
         std::int32_t clientY,
         RuffnecKk::MapSense::NavigationNativePoint& output) noexcept -> bool {
+    output = {.x = clientX, .y = clientY};
+    return true;
+}
+
+int GpsRouteProjectionInvalidationCountdown{-1};
+
+auto ProjectNavigationClientInvalidateGpsRoute(
+        void*,
+        std::int32_t clientX,
+        std::int32_t clientY,
+        RuffnecKk::MapSense::NavigationNativePoint& output) noexcept -> bool {
+    if (GpsRouteProjectionInvalidationCountdown == 0) {
+        RuffnecKk::MapSense::InvalidateNavigationGpsRoutes();
+        GpsRouteProjectionInvalidationCountdown = -1;
+    } else if (GpsRouteProjectionInvalidationCountdown > 0) {
+        --GpsRouteProjectionInvalidationCountdown;
+    }
     output = {.x = clientX, .y = clientY};
     return true;
 }
@@ -1640,6 +1688,35 @@ void CheckNativeAutomapAtlasPolicy() {
     CHECK(!CanAppendNativeAutomapEmittedCell(10'517U));
     CHECK(5'461U * NativeAutomapSerializedBytesPerCell == 32'766U);
     CHECK(5'462U * NativeAutomapSerializedBytesPerCell == 32'772U);
+    // Both supported load orders must accept only their complete native state.
+    constexpr std::array<std::uint8_t, 13U> vanillaSerializer{
+        0x0F, 0xB7, 0x4E, 0x08, 0x66, 0x03, 0xC9,
+        0x0F, 0xBF, 0xC9, 0x41, 0x89, 0x0F};
+    constexpr std::array<std::uint8_t, 13U> fixedSerializer{
+        0x33, 0xC9, 0x8B, 0x56, 0x08, 0x03, 0xD2,
+        0x0F, 0x43, 0xCA, 0x41, 0x89, 0x0F};
+    CHECK(NativeAutomapSerializerByteCountVanilla == vanillaSerializer);
+    CHECK(NativeAutomapSerializerByteCountWide == fixedSerializer);
+    for (const auto& supported : {vanillaSerializer, fixedSerializer}) {
+        CHECK(IsSupportedNativeAutomapSerializerByteCount(supported));
+        for (std::size_t offset = 0; offset < supported.size(); ++offset) {
+            for (unsigned value = 0; value <= 255U; ++value) {
+                if (value == supported[offset]) continue;
+                auto altered = supported;
+                altered[offset] = static_cast<std::uint8_t>(value);
+                CHECK(!IsSupportedNativeAutomapSerializerByteCount(altered));
+            }
+        }
+    }
+    // Reject every mixed partial patch, including noncontiguous writes.
+    for (unsigned mask = 0; mask < (1U << vanillaSerializer.size()); ++mask) {
+        auto mixed = vanillaSerializer;
+        for (std::size_t offset = 0; offset < mixed.size(); ++offset) {
+            if ((mask & (1U << offset)) != 0U) mixed[offset] = fixedSerializer[offset];
+        }
+        CHECK(IsSupportedNativeAutomapSerializerByteCount(mixed)
+            == (mixed == vanillaSerializer || mixed == fixedSerializer));
+    }
 
     NativeAutomapCellKeyValue rejected{};
     CHECK(!BuildNativeAutomapCellKeyValue(
@@ -1697,6 +1774,41 @@ void CheckNativeAutomapAtlasPolicy() {
     CHECK(NativeAutomapLevelsShareReadyLayer(catalog, 256, 256));
     CHECK(!NativeAutomapLevelsShareReadyLayer(catalog, 256, 131));
     CHECK(!NativeAutomapLevelsShareReadyLayer(catalog, 131, 256));
+}
+
+void CheckNativeStatCompatibilityPolicy() {
+    using namespace RuffnecKk::NativeStatCompat;
+
+    using GetUnitStatSignature = std::int32_t(Adapter::*)(
+        void*, std::int32_t, std::uint16_t) const noexcept;
+    using GetUnitAlignmentSignature = std::int32_t(Adapter::*)(
+        void*) const noexcept;
+    static_assert(std::is_same_v<
+        decltype(&Adapter::GetUnitStat), GetUnitStatSignature>);
+    static_assert(std::is_same_v<
+        decltype(&Adapter::GetUnitAlignment), GetUnitAlignmentSignature>);
+
+    constexpr auto requested = ToMask(Helper::GetUnitStat)
+        | ToMask(Helper::GetUnitAlignment);
+    static_assert(requested != 0U);
+    static_assert((requested & ~ToMask(Helper::All)) == 0U);
+    static_assert((requested & ToMask(Helper::GetUnitStat)) != 0U);
+    static_assert((requested & ToMask(Helper::GetUnitAlignment)) != 0U);
+    static_assert((requested & ToMask(Helper::AddUnitStat)) == 0U);
+    static_assert((requested & ToMask(Helper::SetUnitStat)) == 0U);
+
+    Adapter adapter{};
+    constexpr std::int32_t physicalResistanceStatId = 36;
+    constexpr std::uint16_t baseLayer = 0U;
+    CHECK(!adapter.IsBound());
+    CHECK(!adapter.IsBound(Helper::GetUnitStat));
+    CHECK(!adapter.IsBound(Helper::GetUnitAlignment));
+    CHECK(adapter.GetUnitStat(
+        nullptr, physicalResistanceStatId, baseLayer) == 0);
+    CHECK(adapter.GetUnitAlignment(nullptr) == 0);
+    adapter.Reset();
+    CHECK(!adapter.IsBound(Helper::GetUnitStat));
+    CHECK(!adapter.IsBound(Helper::GetUnitAlignment));
 }
 
 void CheckAutomapSpritePackageContract(const char* path) {
@@ -2228,6 +2340,15 @@ void CheckNavigationEngineContract() {
         3,
         destinations.data(),
         destinations.size()));
+    const auto stableDestinationRevision =
+        GetNavigationEngineStatus().destinationRevision;
+    CHECK(PublishNavigationDestinations(
+        41U,
+        3,
+        destinations.data(),
+        destinations.size()));
+    CHECK(GetNavigationEngineStatus().destinationRevision
+        == stableDestinationRevision);
 
     std::uint8_t borrowedContext{};
     auto pass = NavigationAutomapPass{
@@ -2245,6 +2366,9 @@ void CheckNavigationEngineContract() {
     };
     CHECK(ObserveNavigationAutomapPass(pass)
         == NavigationAutomapObservationResult::Projected);
+    // Direct projection remains available when a native world-position witness
+    // is absent; only GPS source acquisition requires that witness.
+    CHECK(!pass.hasPlayerSubtile);
 
     std::vector<NavigationLineSnapshot> lines;
     CHECK(AcquireNavigationLineSnapshots(lines) == 2U);
@@ -2354,6 +2478,258 @@ void CheckNavigationEngineContract() {
         == NavigationAutomapObservationResult::Projected);
     CHECK(AcquireNavigationLineSnapshots(lines) == 2U);
 
+    // GPS routes are published by the asynchronous helper but projected only
+    // from this existing native automap pass. A route remains bound to the
+    // hard destination identity while ordinary movement after submission is
+    // soft state. A map-derived goal may resolve to a bounded standable
+    // approach near the destination.
+    auto gpsPolicy = AcquireNavigationLinePolicySnapshot();
+    gpsPolicy.families[NavigationLineKindIndex(NavigationLineKind::Waypoint)] = {
+        true,
+        NavigationLineMode::GpsTeleport,
+    };
+    CHECK(PublishNavigationLinePolicy(gpsPolicy.families));
+    pass.playerClientX = 160;
+    pass.playerClientY = 80;
+    pass.hasPlayerSubtile = true;
+    pass.playerSubtile = {10, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    NavigationGpsRouteSourceSnapshot routeSource{};
+    CHECK(AcquireNavigationGpsRouteSourceSnapshot(routeSource));
+    CHECK(routeSource.player.subtileX == 10);
+    CHECK(routeSource.player.subtileY == 0);
+    CHECK(routeSource.destinationRevision == GetNavigationEngineStatus().destinationRevision);
+    // GPS requires an explicit native world origin. Losing that witness must
+    // revoke the source without affecting the Direct projection path above.
+    pass.hasPlayerSubtile = false;
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationLineSnapshots(lines) == 1U);
+    CHECK(lines[0].kind == NavigationLineKind::Progression);
+    CHECK(lines[0].startX == 160 && lines[0].startY == 80);
+    CHECK(lines[0].endX == 605 && lines[0].endY == 599);
+    NavigationGpsSourceDiagnostics sourceDiagnostics{};
+    CHECK(!AcquireNavigationGpsRouteSourceSnapshot(routeSource, &sourceDiagnostics));
+    CHECK(sourceDiagnostics.readiness == NavigationGpsSourceReadiness::NoPlayer);
+    // A present but out-of-range native origin is equally unusable for GPS,
+    // while Direct projection continues and records the distinct diagnostic.
+    pass.hasPlayerSubtile = true;
+    pass.playerSubtile = {-1, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(GetNavigationAutomapObservationReason()
+        == NavigationAutomapObservationReason::NoNativeOrigin);
+    CHECK(!AcquireNavigationGpsRouteSourceSnapshot(routeSource, &sourceDiagnostics));
+    CHECK(sourceDiagnostics.readiness == NavigationGpsSourceReadiness::NoPlayer);
+    pass.hasPlayerSubtile = true;
+    pass.playerSubtile = {10, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSourceSnapshot(routeSource));
+    // The helper is asynchronous and can legitimately take longer than the
+    // short Direct-line projection lifetime. Exact player, destination,
+    // level, session, and policy identity—not elapsed wall time—govern whether
+    // its result is still publishable.
+    std::this_thread::sleep_for(std::chrono::milliseconds(275));
+    pass.playerClientX = 192;
+    pass.playerClientY = 96;
+    pass.playerSubtile = {12, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    NavigationGpsRoutePath invalidRoute{
+        .destinationId = 1001U,
+        .policyRevision = routeSource.policy.revision,
+        .kind = NavigationLineKind::Waypoint,
+        .mode = NavigationGpsRouteMode::Teleport,
+        .points = {{10, 0}, {15, 5},
+            {20 + MaximumNavigationGpsGoalSnapDistance + 1, 10}},
+    };
+    CHECK(!PublishNavigationGpsRoutes(
+        routeSource.sessionGeneration,
+        routeSource.destinationRevision,
+        routeSource.policy.revision,
+        routeSource.levelId,
+        &invalidRoute,
+        1U));
+    NavigationGpsRoutePath snappedRoute{
+        .destinationId = 1001U,
+        .policyRevision = routeSource.policy.revision,
+        .kind = NavigationLineKind::Waypoint,
+        .mode = NavigationGpsRouteMode::Teleport,
+        .points = {{10, 0}, {15, 5}, {19, 11}},
+    };
+    CHECK(PublishNavigationGpsRoutes(
+        routeSource.sessionGeneration,
+        routeSource.destinationRevision,
+        routeSource.policy.revision,
+        routeSource.levelId,
+        &snappedRoute,
+        1U));
+    pass.playerClientX = 160;
+    pass.playerClientY = 80;
+    pass.playerSubtile = {10, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    NavigationGpsRoutePath validRoute{
+        .destinationId = 1001U,
+        .policyRevision = routeSource.policy.revision,
+        .kind = NavigationLineKind::Waypoint,
+        .mode = NavigationGpsRouteMode::Teleport,
+        .points = {{10, 0}, {15, 5}, {20, 10}},
+    };
+    CHECK(PublishNavigationGpsRoutes(
+        routeSource.sessionGeneration,
+        routeSource.destinationRevision,
+        routeSource.policy.revision,
+        routeSource.levelId,
+        &validRoute,
+        1U));
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    std::vector<NavigationGpsRouteSegmentSnapshot> gpsSegments;
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    CHECK(gpsSegments[0].mode == NavigationGpsRouteMode::Teleport);
+    CHECK(WantsNavigationGpsRouteFrame());
+    // The origin is also captured before invalid native dimensions reject
+    // projection. This test exercises the engine input contract only.
+    pass.nativeWidth = 0;
+    pass.playerSubtile = {12, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Ignored);
+    CHECK(GetNavigationAutomapObservationReason()
+        == NavigationAutomapObservationReason::InvalidNativeDimensions);
+    CHECK(AcquireNavigationGpsRouteSourceSnapshot(routeSource, &sourceDiagnostics));
+    CHECK(sourceDiagnostics.readiness == NavigationGpsSourceReadiness::Ready);
+    CHECK(routeSource.player.subtileX == 12 && routeSource.player.subtileY == 0);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 0U);
+    pass.nativeWidth = 800;
+
+    // The world origin is captured before projection-only clip rejection.
+    // Invalid viewport bounds draw no route now, but the fresh origin still
+    // becomes the GPS source while the observation reason identifies the clip.
+    pass.clipWidth = 0;
+    pass.playerSubtile = {11, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Ignored);
+    CHECK(GetNavigationAutomapObservationReason()
+        == NavigationAutomapObservationReason::InvalidClip);
+    CHECK(AcquireNavigationGpsRouteSourceSnapshot(routeSource));
+    CHECK(routeSource.player.subtileX == 11 && routeSource.player.subtileY == 0);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 0U);
+    pass.clipWidth = 800;
+    pass.playerSubtile = {10, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    // Present submits the same accepted helper result on later frames. That
+    // idempotent publication must retain the already-projected route until a
+    // real identity or content change arrives.
+    CHECK(PublishNavigationGpsRoutes(
+        routeSource.sessionGeneration,
+        routeSource.destinationRevision,
+        routeSource.policy.revision,
+        routeSource.levelId,
+        &validRoute,
+        1U));
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    CHECK(WantsNavigationGpsRouteFrame());
+    // Overlay viewport rejection and a GPS mode change both call the common
+    // projection invalidator. It must clear the GPS projection just as it
+    // clears Direct lines, while retaining the accepted route for a later
+    // native automap pass.
+    InvalidateNavigationProjection();
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 0U);
+    CHECK(!WantsNavigationGpsRouteFrame());
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    // The native projection callback runs after the engine releases its state
+    // lock. Invalidating routes during the first GPS point must prevent this
+    // stale snapshot from being published when the pass reacquires the lock.
+    // The first callback runs while the initial engine lock is held. The
+    // atomic invalidation request must still be observed after GPS projection
+    // releases and reacquires that lock, so stale segments never reappear.
+    GpsRouteProjectionInvalidationCountdown = 0;
+    pass.projectClient = ProjectNavigationClientInvalidateGpsRoute;
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 0U);
+    CHECK(!WantsNavigationGpsRouteFrame());
+    pass.projectClient = ProjectNavigationClientIdentity;
+    CHECK(PublishNavigationGpsRoutes(
+        routeSource.sessionGeneration,
+        routeSource.destinationRevision,
+        routeSource.policy.revision,
+        routeSource.levelId,
+        &validRoute,
+        1U));
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    pass.currentLevelId = UnknownNavigationLevelId;
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Ignored);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 0U);
+    CHECK(!WantsNavigationGpsRouteFrame());
+    pass.currentLevelId = 3;
+    CHECK(!AcquireNavigationGpsRouteSourceSnapshot(routeSource));
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    pass.playerClientX = 192;
+    pass.playerClientY = 96;
+    pass.playerSubtile = {12, 0};
+    CHECK(ObserveNavigationAutomapPass(pass)
+        == NavigationAutomapObservationResult::Projected);
+    // Moving one subtile starts an asynchronous replacement request. Keep the
+    // last accepted route visible until that replacement is published instead
+    // of blanking GPS guidance during ordinary movement.
+    CHECK(AcquireNavigationGpsRouteSegmentSnapshots(gpsSegments) == 2U);
+    CHECK(WantsNavigationGpsRouteFrame());
+    const auto retainedDirectLineCount = AcquireNavigationLineSnapshots(lines);
+    CHECK(retainedDirectLineCount == 1U);
+    if (retainedDirectLineCount == 1U) {
+        CHECK(lines[0].kind == NavigationLineKind::Progression);
+    }
+    InvalidateNavigationGpsRoutes();
+
+    // A Direct -> GPS round trip can reproduce the same visible mode (ABA),
+    // but it must not revive results computed under the earlier policy. The
+    // revision gate also applies to an empty publication.
+    NavigationGpsRouteSourceSnapshot abaSource{};
+    CHECK(AcquireNavigationGpsRouteSourceSnapshot(abaSource));
+    auto abaDirectPolicy = abaSource.policy;
+    abaDirectPolicy.families[NavigationLineKindIndex(
+        NavigationLineKind::Waypoint)].mode = NavigationLineMode::Direct;
+    CHECK(PublishNavigationLinePolicy(abaDirectPolicy.families));
+    auto abaGpsPolicy = AcquireNavigationLinePolicySnapshot();
+    abaGpsPolicy.families[NavigationLineKindIndex(
+        NavigationLineKind::Waypoint)].mode = NavigationLineMode::GpsTeleport;
+    CHECK(PublishNavigationLinePolicy(abaGpsPolicy.families));
+    CHECK(AcquireNavigationLinePolicySnapshot().revision
+        != abaSource.policy.revision);
+    CHECK(!PublishNavigationGpsRoutes(
+        abaSource.sessionGeneration,
+        abaSource.destinationRevision,
+        abaSource.policy.revision,
+        abaSource.levelId,
+        nullptr,
+        0U));
+    CHECK(!PublishNavigationGpsRoutes(
+        abaSource.sessionGeneration,
+        abaSource.destinationRevision,
+        abaSource.policy.revision,
+        abaSource.levelId,
+        &validRoute,
+        1U));
+
+    auto directPolicy = AcquireNavigationLinePolicySnapshot();
+    directPolicy.families[
+        NavigationLineKindIndex(NavigationLineKind::Waypoint)].mode =
+            NavigationLineMode::Direct;
+    CHECK(PublishNavigationLinePolicy(directPolicy.families));
+
     pass.currentLevelId = UnknownNavigationLevelId;
     CHECK(ObserveNavigationAutomapPass(pass)
         == NavigationAutomapObservationResult::Ignored);
@@ -2394,11 +2770,98 @@ void CheckNavigationEngineContract() {
     CHECK(townStatus.levelId == 4);
     CHECK(townStatus.destinationCount == 0U);
     CHECK(townStatus.projectedLineCount == 0U);
+    ResetNavigationSession(42U);
+    CHECK(BindNavigationLevelForPublish(42U, 3));
+    CHECK(PublishNavigationDestinations(
+        42U,
+        3,
+        destinations.data(),
+        destinations.size()));
+    CHECK(!AcquireNavigationGpsRouteSourceSnapshot(routeSource));
     ShutdownNavigationEngine();
 }
 
 void CheckNavigationPolicyContract() {
     using namespace RuffnecKk::MapSense;
+
+    NavigationLinePolicySnapshot selectionPolicy{};
+    selectionPolicy.revision = 7U;
+    selectionPolicy.families.fill({false, NavigationLineMode::Direct});
+    selectionPolicy.families[NavigationLineKindIndex(
+        NavigationLineKind::Waypoint)] = {true, NavigationLineMode::GpsWalk};
+    selectionPolicy.families[NavigationLineKindIndex(
+        NavigationLineKind::Progression)] = {
+            true, NavigationLineMode::GpsTeleport};
+    const std::array selectionSource{
+        NavigationSubtileDestination{
+            .destinationId = 50U,
+            .subtileX = 1,
+            .subtileY = 1,
+            .kind = NavigationLineKind::Quest,
+            .selection = NavigationDestinationSelection::NearestToPlayer,
+        },
+        NavigationSubtileDestination{
+            .destinationId = 60U,
+            .subtileX = 4,
+            .subtileY = 4,
+            .kind = NavigationLineKind::Waypoint,
+            .selection = NavigationDestinationSelection::NearestToPlayer,
+        },
+        NavigationSubtileDestination{
+            .destinationId = 70U,
+            .subtileX = 8,
+            .subtileY = 8,
+            .kind = NavigationLineKind::Waypoint,
+            .selection = NavigationDestinationSelection::NearestToPlayer,
+        },
+        // One physical destination may serve two independently configured
+        // families and therefore must produce two requests with distinct modes.
+        NavigationSubtileDestination{
+            .destinationId = 80U,
+            .subtileX = 12,
+            .subtileY = 12,
+            .kind = NavigationLineKind::Waypoint,
+        },
+        NavigationSubtileDestination{
+            .destinationId = 80U,
+            .subtileX = 12,
+            .subtileY = 12,
+            .kind = NavigationLineKind::Progression,
+        },
+    };
+    std::array<NavigationGpsRouteDestination, 8U> selectedRoutes{};
+    CHECK(SelectNavigationGpsRouteDestinations(
+        selectionSource, {0, 0}, selectionPolicy, selectedRoutes) == 3U);
+    CHECK(selectedRoutes[0].destination.destinationId == 60U);
+    CHECK(selectedRoutes[0].destination.kind == NavigationLineKind::Waypoint);
+    CHECK(selectedRoutes[0].mode == NavigationGpsRouteMode::Walk);
+    CHECK(selectedRoutes[1].destination.destinationId == 80U);
+    CHECK(selectedRoutes[1].destination.kind == NavigationLineKind::Waypoint);
+    CHECK(selectedRoutes[1].mode == NavigationGpsRouteMode::Walk);
+    CHECK(selectedRoutes[2].destination.destinationId == 80U);
+    CHECK(selectedRoutes[2].destination.kind == NavigationLineKind::Progression);
+    CHECK(selectedRoutes[2].mode == NavigationGpsRouteMode::Teleport);
+
+    // Filtering happens before the fixed route cap. Disabled candidates can
+    // never crowd out the one enabled GPS destination.
+    std::array<NavigationSubtileDestination, 65U> cappedSource{};
+    for (std::size_t index = 0U; index < 64U; ++index) {
+        cappedSource[index] = {
+            .destinationId = 1'000U + index,
+            .subtileX = static_cast<std::int32_t>(index),
+            .subtileY = static_cast<std::int32_t>(index),
+            .kind = NavigationLineKind::Quest,
+        };
+    }
+    cappedSource.back() = {
+        .destinationId = 2'000U,
+        .subtileX = 100,
+        .subtileY = 100,
+        .kind = NavigationLineKind::Waypoint,
+    };
+    CHECK(SelectNavigationGpsRouteDestinations(
+        cappedSource, {0, 0}, selectionPolicy, selectedRoutes) == 1U);
+    CHECK(selectedRoutes[0].destination.destinationId == 2'000U);
 
     CHECK(MainProgressionTargetFor(3).value_or(-1) == 4);
     CHECK(MainProgressionTargetFor(6).value_or(-1) == 7);
@@ -3244,6 +3707,127 @@ void CheckNavigationPolicyContract() {
             .customTargetLevelIds = customTargetIds,
         },
         bounded) == 1U);
+}
+
+void CheckGpsRouteCoordinatorPolicyContract() {
+    using namespace RuffnecKk::MapSense;
+
+    GpsRouteProviderRequest active{
+        .identity = {
+            .sessionGeneration = 41U,
+            .destinationRevision = 7U,
+            .policyRevision = 9U,
+            .terrainRevision = 11U,
+            .destinationId = 1001U,
+            .destinationKind = static_cast<std::uint8_t>(
+                NavigationLineKind::Waypoint),
+            .artifact = {
+                .seed = 123U,
+                .difficulty = 1U,
+                .levelId = 4,
+                .fromSubtileX = 10,
+                .fromSubtileY = 20,
+                .toSubtileX = 80,
+                .toSubtileY = 90,
+                .mode = GpsRouteMode::Walk,
+            },
+        },
+    };
+    auto moved = active;
+    moved.identity.artifact.fromSubtileX = 11;
+    CHECK(SameGpsRouteCoordinatorHardScope(active, moved));
+    CHECK(!ShouldGpsRouteCoordinatorReplan(active, moved, 100U, 2'000U, true));
+    moved.identity.artifact.fromSubtileX = 18;
+    CHECK(!ShouldGpsRouteCoordinatorReplan(active, moved, 100U, 700U, true));
+    CHECK(!ShouldGpsRouteCoordinatorReplan(active, moved, 100U, 2'000U, false));
+    CHECK(ShouldGpsRouteCoordinatorReplan(active, moved, 100U, 2'000U, true));
+
+    auto hardChange = active;
+    ++hardChange.identity.terrainRevision;
+    CHECK(!SameGpsRouteCoordinatorHardScope(active, hardChange));
+
+    GpsRouteProviderPath ready{
+        .identity = active.identity,
+        .moves = {{10, 20}, {80, 90}},
+    };
+    ready.identity.artifact.dataFingerprint = 55U;
+    const std::array requests{active};
+    const std::array paths{ready};
+    CHECK(IsGpsRouteCoordinatorBatchComplete(requests, paths));
+    auto stale = ready;
+    stale.identity.artifact.fromSubtileX = 12;
+    const std::array stalePaths{stale};
+    CHECK(!IsGpsRouteCoordinatorBatchComplete(requests, stalePaths));
+    const std::array<GpsRouteProviderPath, 0U> noPaths{};
+    CHECK(!IsGpsRouteCoordinatorBatchComplete(requests, noPaths));
+}
+
+void CheckNavigationLineModeConfigContract() {
+    using namespace RuffnecKk::MapSense;
+
+    const auto schema18NavigationModes = ParseConfig(R"toml(
+schema_version = 18
+[navigation.waypoint]
+enabled = true
+line_mode = "gps_walk"
+color = "#01020304"
+[navigation.progression]
+enabled = true
+line_mode = "gps_teleport"
+color = "#11121314"
+[navigation.quests]
+enabled = false
+line_mode = "direct"
+color = "#21222324"
+[navigation.custom_levels]
+enabled = true
+line_mode = "gps_walk"
+color = "#31323334"
+targets = [{ level_id = 12 }]
+)toml");
+    CHECK(schema18NavigationModes.navigation.waypoint.lineMode
+        == NavigationLineMode::GpsWalk);
+    CHECK(schema18NavigationModes.navigation.progression.lineMode
+        == NavigationLineMode::GpsTeleport);
+    CHECK(schema18NavigationModes.navigation.quests.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(schema18NavigationModes.navigation.customLevels.lineMode
+        == NavigationLineMode::GpsWalk);
+    const auto serializedSchema18 = SerializeConfig(schema18NavigationModes);
+    CHECK(serializedSchema18.find("line_mode = \"gps_walk\"")
+        != std::string::npos);
+    CHECK(serializedSchema18.find("line_mode = \"gps_teleport\"")
+        != std::string::npos);
+
+    auto unavailableGps = schema18NavigationModes;
+    CHECK(FallbackUnavailableGpsLineModesToDirect(unavailableGps));
+    CHECK(unavailableGps.navigation.waypoint.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(unavailableGps.navigation.progression.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(unavailableGps.navigation.quests.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(unavailableGps.navigation.customLevels.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(!FallbackUnavailableGpsLineModesToDirect(unavailableGps));
+
+    CHECK(Throws([] {
+        ParseConfig(R"toml(
+schema_version = 18
+[navigation.waypoint]
+enabled = true
+color = "#01020304"
+)toml");
+    }));
+    CHECK(Throws([] {
+        ParseConfig(R"toml(
+schema_version = 18
+[navigation.waypoint]
+enabled = true
+line_mode = "walk_run"
+color = "#01020304"
+)toml");
+    }));
 }
 
 void CheckNavigationResolverHelpers() {
@@ -4949,6 +5533,20 @@ void CheckAutomapLabelResolutionPolicy() {
     CHECK(normal.TextSize(8.0F) == 8.0F);
     CHECK(ResolveAutomapLabelMetrics({3840.0F, 2160.0F}, 1.0F).TextSize(8.0F) == 8.0F);
     CHECK(ResolveAutomapLabelMetrics({3840.0F, 2160.0F}, 1.0F).TextSize(72.0F) == 72.0F);
+    CHECK(nearlyEqual(ResolveNativeAutomapViewportScale(
+        3840, 2160, 3840, 2160), 1.0F));
+    CHECK(nearlyEqual(ResolveNativeAutomapViewportScale(
+        3840, 2160, 3000, 1700), 1.0F));
+    CHECK(nearlyEqual(ResolveNativeAutomapViewportScale(
+        3840, 2160, 1200, 800), 1200.0F / 3840.0F));
+    CHECK(nearlyEqual(ResolveNativeAutomapViewportScale(
+        3840, 2160, 400, 300), 0.25F));
+    CHECK(nearlyEqual(ResolveNativeAutomapViewportScale(
+        0, 2160, 1200, 800), 1.0F));
+    CHECK(nearlyEqual(normal.IconTopExtentForViewport(44.0F, 1.0F), 22.0F));
+    CHECK(nearlyEqual(normal.IconTopExtentForViewport(44.0F, 0.5F), 11.0F));
+    CHECK(nearlyEqual(normal.SpacingForViewport(18.0F, 0.5F), 4.5F));
+    CHECK(nearlyEqual(normal.SpacingForViewport(18.0F, 0.0F), 2.25F));
     for (const auto invalid : std::array{
             Vec2{0.0F, 1080.0F}, Vec2{1920.0F, -1.0F},
             Vec2{1920.0F, std::numeric_limits<float>::quiet_NaN()},
@@ -5056,6 +5654,7 @@ int main(int argc, char** argv) {
     CheckExternalAtlasGeometryContract();
     CheckAtlasProjectionContract();
     CheckNativeAutomapAtlasPolicy();
+    CheckNativeStatCompatibilityPolicy();
     if (argc >= 3) CheckAutomapSpritePackageContract(argv[2]);
     CheckExternalAtlasCacheContract();
     CheckStaticPoiRoomSelectionContract();
@@ -5063,13 +5662,14 @@ int main(int argc, char** argv) {
     CheckNavigationEngineContract();
     CheckNavigationLevelCatalogContract();
     CheckNavigationPolicyContract();
+    CheckGpsRouteCoordinatorPolicyContract();
     CheckNavigationResolverHelpers();
     CheckAutomapWaypointCatalogContract();
     CheckAutomapLevelCatalogContract();
     CheckTownWaypointLabelPolicy();
     CheckAutomapLabelResolutionPolicy();
 
-    static_assert(CurrentConfigSchemaVersion == 17);
+    static_assert(CurrentConfigSchemaVersion == 18);
     static_assert(MenuThemes.size() == 10U);
     static_assert(MenuScales.size() == 6U);
     static_assert(ResolveMenuScale(MenuScale::Automatic, 4.0F / 3.0F)
@@ -5778,7 +6378,7 @@ theme = "arcane_sanctuary"
         == MenuScale::Automatic);
     const auto serializedSchema16 = SerializeConfig(
         schema16FeatureMastersAndTheme);
-    CHECK(serializedSchema16.find("schema_version = 17")
+    CHECK(serializedSchema16.find("schema_version = 18")
         != std::string::npos);
     CHECK(serializedSchema16.find("features_enabled") == std::string::npos);
     CHECK(serializedSchema16.find("[overlay]\nenabled")
@@ -5811,6 +6411,12 @@ interface_scale = "150%"
         != std::string::npos);
     const auto roundTripSchema17 = ParseConfig(serializedSchema17);
     CHECK(roundTripSchema17.menu.interfaceScale == MenuScale::Percent150);
+    CHECK(roundTripSchema17.navigation.waypoint.lineMode
+        == NavigationLineMode::Direct);
+    CHECK(roundTripSchema17.navigation.progression.lineMode
+        == NavigationLineMode::Direct);
+
+    CheckNavigationLineModeConfigContract();
 
     const auto legacyOverlayDisabled = ParseConfig(R"toml(
 schema_version = 15
@@ -6330,7 +6936,7 @@ show_with_automap_only = true
     }
 
     CHECK(Throws([] { ParseConfig(""); }));
-    CHECK(Throws([] { ParseConfig("schema_version = 18"); }));
+    CHECK(!Throws([] { ParseConfig("schema_version = 18"); }));
     CHECK(Throws([] { ParseConfig("schema_version = true"); }));
     CHECK(Throws([] {
         ParseConfig(

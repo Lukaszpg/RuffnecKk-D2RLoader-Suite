@@ -598,7 +598,7 @@ void RememberFailedRequestLocked(const RequestKey& key) noexcept {
         };
         return appendRoots(
                 L"--excel-root",
-                request.dataCatalog->ActiveExcelDirectories())
+                request.dataCatalog->AtlasExcelDirectories())
             && appendRoots(
                 L"--tiles-root",
                 request.dataCatalog->ActiveTileDirectories());

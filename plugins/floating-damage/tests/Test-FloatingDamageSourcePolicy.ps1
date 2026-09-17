@@ -128,29 +128,20 @@ foreach ($obsoleteInputToken in @(
         "obsolete private input token remains: $obsoleteInputToken"
 }
 
-Assert-Policy ($plugin -match 'DiagnosticsServiceV1') `
-    'the shared STATLIST_SetUnitStat entry must use Diagnostics v1'
-Assert-Policy ($plugin -match 'ModificationState::Unchanged') `
-    'the vanilla STATLIST_SetUnitStat entry must remain accepted'
-Assert-Policy ($plugin -match 'ModificationState::Tracked') `
-    'a loader-tracked shared entry must be recognized'
-Assert-Policy ($plugin -match 'ModificationKind::InlineHook') `
-    'only a loader-owned inline hook may compose at STATLIST_SetUnitStat'
-Assert-Policy ($plugin -match 'status\.ownerCount\s*!=\s*1') `
-    'exactly one tracked owner must be required at STATLIST_SetUnitStat'
-Assert-Policy (
-    [regex]::Matches(
-        $plugin,
-        'MatchesSignature\(SetUnitStatRva').Count -eq 1) `
-    'the vanilla setter check must exist only as the Diagnostics-unavailable fallback'
-Assert-Policy ($plugin -match 'SetUnitStat\s*=\s*reinterpret_cast<SetUnitStatFn>\(Base\s*\+\s*SetUnitStatRva\)') `
-    'Floating Damage must call the live STATLIST_SetUnitStat entry so later hooks also compose'
+Assert-Policy ($plugin -match 'RuffnecKk/native_stat_compat\.hpp') `
+    'the shared stat compatibility adapter must own stat-entry admission'
+Assert-Policy ($plugin -match 'Helper::GetUnitStat') `
+    'the reader must be admitted explicitly'
+Assert-Policy ($plugin -match 'Helper::SetUnitStat') `
+    'the setter must be admitted explicitly'
+Assert-Policy ($plugin -match 'SetUnitStatWide\(target,\s*statId,\s*newFixed,\s*layer\)') `
+    'commit interceptors must preserve the complete provider layer'
 
 Assert-Policy ($plugin -match 'PeriodicHitpointsCommitCallRva\s*=\s*0x448D4C') `
     'the governed monster periodic HP commit seam must remain 0x448D4C'
 Assert-Policy ($plugin -match 'PatchCallRel32\([\s\S]*?PeriodicHitpointsCommitCallRva') `
     'the periodic HP commit call must be patched through the loader transaction'
-Assert-Policy ($plugin -match 'HookPeriodicHitpointsCommit\([\s\S]*?TryGetFixedHitpoints\(target,\s*beforeFixed\)[\s\S]*?SetUnitStat\(target,\s*statId,\s*newFixed,\s*layer\)[\s\S]*?TryGetFixedHitpoints\(target,\s*afterFixed\)[\s\S]*?QueueCommittedVisibleLoss') `
+Assert-Policy ($plugin -match 'HookPeriodicHitpointsCommit\([\s\S]*?TryGetFixedHitpoints\(target,\s*beforeFixed\)[\s\S]*?SetUnitStatWide\(target,\s*statId,\s*newFixed,\s*layer\)[\s\S]*?TryGetFixedHitpoints\(target,\s*afterFixed\)[\s\S]*?QueueCommittedVisibleLoss') `
     'periodic capture must measure the actual visible HP loss around the live setter'
 Assert-Policy ($plugin -match 'ElementFromPeriodicStates\([\s\S]*?BurningStateId[\s\S]*?Element::Fire[\s\S]*?PoisonStateId[\s\S]*?Element::Poison') `
     'periodic attribution must prioritize Burn, then Poison, from native states'
@@ -162,10 +153,10 @@ Assert-Policy (-not $plugin.Contains('only D2R builds')) `
     'compatibility refusal must be based on the native fingerprint, not named builds'
 Assert-Policy ($plugin -match 'validating the complete native fingerprint') `
     'the observed build name must remain diagnostic while the full fingerprint is checked'
-Assert-Policy ($plugin -match '\.version\s*=\s*"1\.4\.3"') `
-    'the plugin metadata must identify the MapSense handoff hotfix as 1.4.3'
-Assert-Policy ($resource -match 'FILEVERSION\s+1,4,3,0') `
-    'the Windows file version must identify the MapSense handoff hotfix as 1.4.3'
+Assert-Policy ($plugin -match '\.version\s*=\s*"1\.5\.0"') `
+    'the plugin metadata must identify the stat compatibility update as 1.5.0'
+Assert-Policy ($resource -match 'FILEVERSION\s+1,5,0,0') `
+    'the Windows file version must identify the stat compatibility update as 1.5.0'
 Assert-Policy ($plugin -match 'GetModuleHandleW\(\s*L"d2rl-ruffneckk-mapsense\.dll"\)') `
     'the renderer handoff must resolve the canonical public MapSense module name'
 Assert-Policy ($plugin -match 'GetModuleHandleW\(L"RuffnecKkMapSense\.dll"\)') `

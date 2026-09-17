@@ -1,5 +1,70 @@
 # Changelog
 
+## [1.4.0] - 2026-09-17
+
+Suite 1.4 updates the following plugins for D2RLoader 1.3:
+
+- Bulk Skill Point Allocation 1.3.5
+- Burn Damage Fix 1.1.0
+- Cast Triggers 1.1.0
+- Charm Aura Trigger Fix 1.7.0
+- Floating Damage 1.5.0
+- Larzuk Sockets 1.1.0
+- MassID 2.1.0
+- Prevent Merc Death in Town 1.1.0
+- Vendor Stock Refresh 2.1.0
+
+### PlayerX Scaling Tweaks 1.0.0
+
+Added expanded `/players` controls, including configurable command limits,
+minimum difficulty, separate monster scaling caps, and optional NoDrop party
+simulation. An optional Battle.net-style simulation mode can use connected
+players for scaling.
+
+### MapSense 2.0.0
+
+MapSense now includes GPS route lines for Walk/Run mode and Teleport mode. GPS
+lines automatically draw the fastest route to a destination and reconnect as
+your character moves. This is especially helpful on closed maps with corridors,
+doors, walls and other obstacles.
+
+### Repair Costs Cap 1.4.5
+
+Repair Costs Cap can now use separate limits for individual item repairs and
+Repair All. Existing configurations remain compatible: the previous limit
+continues to apply to both types of repairs until separate limits are configured.
+
+### Four Character Item Codes
+
+New patch: Four Character Item Codes allows modders to use four-character item
+codes, expanding the previous three-character limit.
+
+### No Gold Loss on Death
+
+No more losing or dropping gold upon death.
+
+### Removed
+
+- ISC12 and its D2R Save Converter are no longer included because D2RLoader 1.3
+  now handles their expanded item-stat and save features.
+- Extended Act Level IDs is no longer included because it is now a native
+  D2RLoader feature.
+- Ground Item Label Limit 64 and Ground Item Label Limit 128 are no longer
+  needed because D2RLoader now provides this feature.
+- Normal Area Scaling is no longer distributed with the Suite. Yinyin's working
+  alternative is recommended instead.
+- Player Difficulty Overrides is no longer included because PlayerX Scaling
+  Tweaks provides more player-count and monster-scaling controls.
+
+### Configuration files
+
+Do not overwrite existing configuration files. MapSense upgrades its existing
+configuration automatically, and Repair Costs Cap continues to support its
+previous single-limit setting. When installing PlayerX Scaling Tweaks for the
+first time, copy its included configuration file; the two new optional patches
+do not use configuration files. The other D2RLoader 1.3 updates require no
+configuration changes.
+
 ## [1.3.3] - 2026-09-05
 
 This release updates **MapSense to 1.0.2** and **Resistance Floor to 1.0.2**. All other plugins and patches retain their versions from Suite 1.3.2.

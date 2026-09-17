@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include "burn_damage_fix_policy.hpp"
 
@@ -47,7 +48,6 @@ constexpr std::uintptr_t GetDataTablesForContextRva = 0x300A90;
 constexpr std::uintptr_t StateOverlayFieldDescriptorRva = 0x307EB3;
 constexpr std::uintptr_t StateRecordCompileWitnessRva = 0x3083D7;
 constexpr std::uintptr_t StateVectorLayoutWitnessRva = 0x30843C;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
 constexpr std::uintptr_t CheckStateRva = 0x3351B0;
 constexpr std::uintptr_t StateToggleContextLayoutWitnessRva = 0x3354E0;
 constexpr std::uintptr_t SetOverlayRva = 0x349020;
@@ -165,11 +165,6 @@ constexpr auto StateVectorLayoutWitnessExpected =
         0x48,0x8D,0xB7,0x90,0x02,0x00,0x00,0x48,0x8D,0x44,0x24,0x48,0x48,
         0x3B,0xF0,0x74,0x2B,0x4C,0x39,0x7E,0x10,0x7C,0x18,0x48,0x8B,0x1E,
     });
-constexpr std::array<std::uint8_t, 32> GetUnitStatExpected{
-    0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x48,0x89,0x74,0x24,
-    0x20,0x57,0x48,0x83,0xEC,0x20,0x41,0x0F,0xB7,0xE8,0x8B,0xFA,0x48,0x8B,
-    0xD9,0x48,0x85,0xC9,
-};
 constexpr std::array<std::uint8_t, 32> CheckStateExpected{
     0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xEC,
     0x20,0x8B,0xDA,0x48,0x8B,0xF1,0xE8,0x07,0x68,0x01,0x00,0x85,0xC0,0x74,
@@ -342,8 +337,6 @@ using GetDifficultyRecordFn = void*(__fastcall*)(
     std::uint32_t, std::int32_t) noexcept;
 using GetDataTablesForContextFn = void*(__fastcall*)(
     std::uint8_t) noexcept;
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    void*, std::int32_t, std::int32_t) noexcept;
 using CheckStateFn = std::int32_t(__fastcall*)(
     void*, std::int32_t) noexcept;
 using SetOverlayFn = void(__fastcall*)(
@@ -368,7 +361,20 @@ ApplyBurnDamageFn OriginalApplyBurnDamage{};
 ApplyResistancesAndAbsorbFn ApplyResistancesAndAbsorb{};
 GetDifficultyRecordFn GetDifficultyRecord{};
 GetDataTablesForContextFn GetDataTablesForContext{};
-GetUnitStatFn GetUnitStat{};
+// STATLIST_GetUnitStat at 0x2F5020 is admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 CheckStateFn CheckState{};
 SetOverlayFn SetOverlay{};
 IsDeadFn IsDead{};
@@ -403,7 +409,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-burn-damage-fix",
     .name = "Burn Damage Fix",
-    .version = "1.0.1",
+    .version = "1.1.0",
     .author = "RuffnecKk",
     .description = "Restores Burn damage and Fire defenses with a moving periodic flame.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -770,15 +776,25 @@ auto ValidateRuntime() noexcept -> bool {
         return false;
     };
 
+    if ((Settings.normalizeGenericBurn || Settings.applyFireResistance
+            || Settings.replayFireHit)
+        && !NativeStats.BindCurrentProcess(
+            reinterpret_cast<std::uintptr_t>(Base),
+            RuffnecKk::NativeStatCompat::ToMask(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat))) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "BurnDamageFix: unit-stat compatibility admission failed (%s); plugin refused.",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+        return false;
+    }
+
     if (Settings.normalizeGenericBurn) {
         if (!ValidateExclusiveSurface(
                 GenericBurnProductionRva,
                 GenericBurnProductionExpected,
-                "generic Burn production seam")
-                || !requireSignature(
-                    GetUnitStatRva,
-                    GetUnitStatExpected,
-                    "unit stat resolver")) {
+                "generic Burn production seam")) {
             return false;
         }
     }
@@ -792,10 +808,6 @@ auto ValidateRuntime() noexcept -> bool {
                     GetDifficultyRecordRva,
                     GetDifficultyRecordExpected,
                     "difficulty record resolver")
-                || !requireSignature(
-                    GetUnitStatRva,
-                    GetUnitStatExpected,
-                    "unit stat resolver")
                 || !requireSignature(
                     GetUnitTypeRva,
                     GetUnitTypeExpected,
@@ -903,10 +915,6 @@ auto ValidateRuntime() noexcept -> bool {
                     CheckStateRva,
                     CheckStateExpected,
                     "burning-state predicate")
-                || !requireSignature(
-                    GetUnitStatRva,
-                    GetUnitStatExpected,
-                    "direct-overlay stat resolver")
                 || !requireSignature(
                     GetUnitTypeRva,
                     GetUnitTypeExpected,
@@ -1304,9 +1312,11 @@ auto ObserveBurningState(
     bool active{};
     __try {
         active = CheckState(unit, BurningState) != 0;
-        if (active && replayOverlay && SetOverlay && IsDead && GetUnitStat
+        if (active && replayOverlay && SetOverlay && IsDead
+                && NativeStats.IsBound(
+                    RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
                 && IsDead(unit) == 0) {
-            const auto activeDirectOverlay = GetUnitStat(
+            const auto activeDirectOverlay = NativeStats.GetUnitStat(
                 unit, UnitDoOverlayStat, 0);
             if (activeDirectOverlay != 0
                     && activeDirectOverlay != FireHitOverlay) {
@@ -1435,7 +1445,7 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Burn Damage Fix 1.0.1: active=%s; build=%s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s/%llu/%llu/%llu/%llu/%llu removed/already-none/custom/fail/restored; diagnostics=%s; production=%llu/%llu; resolved=%llu/%llu/%llu applied/cancelled/fail; burning-state=%llu/%llu active/missing; overlay-replay=%llu/%llu/%llu replayed/cadence/foreign-replaced; config=%s.",
+        "Burn Damage Fix 1.1.0: active=%s; build=%s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s/%llu/%llu/%llu/%llu/%llu removed/already-none/custom/fail/restored; diagnostics=%s; production=%llu/%llu; resolved=%llu/%llu/%llu applied/cancelled/fail; burning-state=%llu/%llu active/missing; overlay-replay=%llu/%llu/%llu replayed/cadence/foreign-replaced; config=%s.",
         Operational.load(std::memory_order_acquire) ? "true" : "false",
         RuntimeBuild.c_str(),
         Settings.normalizeGenericBurn ? "on" : "off",
@@ -1512,7 +1522,7 @@ void ResetState() noexcept {
     ApplyResistancesAndAbsorb = nullptr;
     GetDifficultyRecord = nullptr;
     GetDataTablesForContext = nullptr;
-    GetUnitStat = nullptr;
+    NativeStats.Reset();
     CheckState = nullptr;
     SetOverlay = nullptr;
     IsDead = nullptr;
@@ -1533,7 +1543,10 @@ extern "C" std::int32_t __fastcall BurnDamageFixNormalizeGeneric(
         std::int32_t scaledExistingBurn,
         std::uint32_t advancedRandom) noexcept {
     if (!Operational.load(std::memory_order_acquire)
-            || !Settings.normalizeGenericBurn || !GetUnitStat || !attacker) {
+            || !Settings.normalizeGenericBurn
+            || !NativeStats.IsBound(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+            || !attacker) {
         return NormalizeGenericNumerator(
             scaledExistingBurn, 0, 0, 0, advancedRandom);
     }
@@ -1542,11 +1555,11 @@ extern "C" std::int32_t __fastcall BurnDamageFixNormalizeGeneric(
     std::int32_t burningMax{};
     std::int32_t fireMastery{};
     __try {
-        burningMax = GetUnitStat(attacker, BurningMaxStat, 0);
+        burningMax = NativeStats.GetUnitStat(attacker, BurningMaxStat, 0);
         if (burningMax > 0) {
-            burningMin = GetUnitStat(attacker, BurningMinStat, 0);
+            burningMin = NativeStats.GetUnitStat(attacker, BurningMinStat, 0);
             if (burningMin > 0) {
-                fireMastery = GetUnitStat(attacker, PassiveFireMasteryStat, 0);
+                fireMastery = NativeStats.GetUnitStat(attacker, PassiveFireMasteryStat, 0);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1596,7 +1609,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
     if (!Settings.enabled) {
         context->LogInfo(
-            "Burn Damage Fix 1.0.1 by RuffnecKk loaded disabled; no hook was installed.");
+            "Burn Damage Fix 1.1.0 by RuffnecKk loaded disabled; no hook was installed.");
         return true;
     }
 
@@ -1619,7 +1632,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     GetDifficultyRecord = At<GetDifficultyRecordFn>(GetDifficultyRecordRva);
     GetDataTablesForContext = At<GetDataTablesForContextFn>(
         GetDataTablesForContextRva);
-    GetUnitStat = At<GetUnitStatFn>(GetUnitStatRva);
     CheckState = At<CheckStateFn>(CheckStateRva);
     SetOverlay = At<SetOverlayFn>(SetOverlayRva);
     IsDead = At<IsDeadFn>(IsDeadRva);
@@ -1665,7 +1677,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         message,
         sizeof(message),
-        "Burn Damage Fix 1.0.1 by RuffnecKk active for observed D2R %s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s; installation=%s; TOML=%s.",
+        "Burn Damage Fix 1.1.0 by RuffnecKk active for observed D2R %s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s; installation=%s; TOML=%s.",
         RuntimeBuild.c_str(),
         Settings.normalizeGenericBurn ? "enabled" : "disabled",
         Settings.applyFireResistance ? "enabled" : "disabled",

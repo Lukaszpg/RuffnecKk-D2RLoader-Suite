@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Four Character Item Codes",
+  "description": "Displays HD graphics for items with four-character codes.",
+  "patches": [
+    {
+      "description": "Compile the third and fourth items.json key bytes with vanilla space padding",
+      "op": "bytes",
+      "rva": "0x6639FF",
+      "expected": "0F B6 46 02 84 C0 75 09 66 C7 44 24 26 20 20 EB 09 88 44 24 26 C6 44 24 27 20",
+      "bytes": "8A 46 02 84 C0 75 02 B0 20 88 44 24 26 8A 46 03 84 C0 75 02 B0 20 88 44 24 27"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+#pragma once
+
+namespace ruffneckk::player_scaling {
+
+inline constexpr char DefaultConfig[] = R"toml(@PLAYER_SCALING_DEFAULT_TOML@)toml";
+
+} // namespace ruffneckk::player_scaling

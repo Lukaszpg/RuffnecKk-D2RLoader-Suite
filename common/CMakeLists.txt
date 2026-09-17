@@ -51,6 +51,7 @@ endif()
 
 add_library(RuffnecKkSuiteCommon INTERFACE)
 add_library(RuffnecKk::Common ALIAS RuffnecKkSuiteCommon)
+target_include_directories(RuffnecKkSuiteCommon INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
     RuffnecKkSuiteCommon
     INTERFACE
@@ -60,9 +61,25 @@ target_link_libraries(
 
 add_library(RuffnecKkSuiteCommonV4 INTERFACE)
 add_library(RuffnecKk::CommonV4 ALIAS RuffnecKkSuiteCommonV4)
+target_include_directories(RuffnecKkSuiteCommonV4 INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
     RuffnecKkSuiteCommonV4
     INTERFACE
         RuffnecKk::BuildPolicy
         D2RLPluginV4::D2RLPluginV4
 )
+
+add_library(RuffnecKkSuiteNativeStatCompat STATIC src/native_stat_compat.cpp)
+add_library(RuffnecKk::NativeStatCompat ALIAS RuffnecKkSuiteNativeStatCompat)
+target_include_directories(RuffnecKkSuiteNativeStatCompat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(RuffnecKkSuiteNativeStatCompat PUBLIC RuffnecKk::BuildPolicy)
+
+if(BUILD_TESTING)
+    add_executable(ruffneckk_native_stat_compat_tests tests/native_stat_compat_tests.cpp)
+    target_link_libraries(ruffneckk_native_stat_compat_tests PRIVATE RuffnecKk::NativeStatCompat)
+    add_test(NAME ruffneckk.common.native-stat-compat COMMAND ruffneckk_native_stat_compat_tests)
+
+    add_executable(ruffneckk_localization_service_tests tests/localization_tests.cpp)
+    target_link_libraries(ruffneckk_localization_service_tests PRIVATE RuffnecKk::Common)
+    add_test(NAME ruffneckk.common.localization COMMAND ruffneckk_localization_service_tests)
+endif()

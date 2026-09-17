@@ -311,15 +311,18 @@ public:
         -> const DataCatalogFamilyStatus&;
     [[nodiscard]] auto FamilyStatuses() const noexcept
         -> std::span<const DataCatalogFamilyStatus>;
-    // Ordered roots resolved from D2RLoader's active mod. The external helper
-    // searches them in the same precedence order and falls back to its
-    // embedded vanilla data for every missing table/DS1.
+    // Ordered roots resolved from D2RLoader's active mod.
     [[nodiscard]] auto ActiveExcelDirectories() const noexcept
         -> std::span<const std::filesystem::path>;
     [[nodiscard]] auto ActiveTileDirectories() const noexcept
         -> std::span<const std::filesystem::path>;
-    // Stable session identity over the active table bytes plus bounded tile
-    // metadata. Zero denotes the all-embedded vanilla source set.
+    // Existing active roots followed by the matching auditable vanilla roots.
+    // The external helper selects the first root containing each table, then
+    // uses its embedded data only when no supplied root contains that table.
+    [[nodiscard]] auto AtlasExcelDirectories() const noexcept
+        -> std::span<const std::filesystem::path>;
+    // Stable session identity over the complete helper source chain plus
+    // bounded active tile metadata. Zero denotes all-embedded vanilla data.
     [[nodiscard]] auto AtlasDataFingerprint() const noexcept
         -> std::uint64_t;
     [[nodiscard]] auto HasLocalizationService() const noexcept -> bool;

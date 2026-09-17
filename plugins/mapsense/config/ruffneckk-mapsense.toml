@@ -2,7 +2,7 @@
 # Configure normal settings in the in-game MapSense menu.
 # Only navigation.custom_levels.targets is intended for manual editing.
 
-schema_version = 17
+schema_version = 18
 
 [general]
 # Master switch for every MapSense feature. The settings panel remains available.
@@ -141,20 +141,24 @@ line_thickness = 2.00
 
 [navigation.waypoint]
 enabled = true
+line_mode = "direct"
 color = "#3D8BFFFF"
 
 [navigation.progression]
 enabled = true
+line_mode = "direct"
 color = "#57E03DFF"
 
 [navigation.quests]
 # Marks static normal-quest routes and exact quest POIs, including the tomb.
 enabled = true
+line_mode = "direct"
 color = "#FF3B30FF"
 
 [navigation.custom_levels]
 # This switch and color are also available in the MapSense menu.
 enabled = false
+line_mode = "direct"
 color = "#C75CFFFF"
 # Edit only this list manually. Each entry must contain exactly one level_id
 # or level_name. Level IDs are the safest choice when a name is ambiguous.

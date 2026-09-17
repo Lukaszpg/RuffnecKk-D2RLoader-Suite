@@ -167,7 +167,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-vendor-stock-refresh",
     .name = "Vendor Stock Refresh",
-    .version = "2.0.2",
+    .version = "2.1.0",
     .author = "RuffnecKk",
     .description = "Refreshes a vendor's stock with one click.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -383,6 +383,28 @@ bool ValidateD2RCoreProviderAbi(
         expectedHash = &D2RCoreProviderHash121Release;
         expectedUnwind = &D2RCoreProviderUnwind121Release;
         expectedFuncInfo = &D2RCoreProviderFuncInfo121Release;
+        break;
+    case D2RCoreProviderProfile::PublicPacketProvider:
+        providerRva = D2RCoreProviderRvaPublicPacket;
+        providerSize = D2RCoreProviderSizePublicPacket;
+        providerUnwindRva = D2RCoreProviderUnwindRvaPublicPacket;
+        providerFuncInfoRva = D2RCoreProviderFuncInfoRvaPublicPacket;
+        expectedHash = &D2RCoreProviderHashPublicPacket;
+        expectedUnwind = &D2RCoreProviderUnwindPublicPacket;
+        expectedFuncInfo = &D2RCoreProviderFuncInfoPublicPacket;
+        break;
+    case D2RCoreProviderProfile::EligibilityCheckedPacketProvider:
+        providerRva = D2RCoreProviderRvaEligibilityCheckedPacket;
+        providerSize = D2RCoreProviderSizeEligibilityCheckedPacket;
+        providerUnwindRva =
+            D2RCoreProviderUnwindRvaEligibilityCheckedPacket;
+        providerFuncInfoRva =
+            D2RCoreProviderFuncInfoRvaEligibilityCheckedPacket;
+        expectedHash = &D2RCoreProviderHashEligibilityCheckedPacket;
+        expectedUnwind =
+            &D2RCoreProviderUnwindEligibilityCheckedPacket;
+        expectedFuncInfo =
+            &D2RCoreProviderFuncInfoEligibilityCheckedPacket;
         break;
     default:
         return false;
@@ -892,7 +914,7 @@ auto Status(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void
     std::snprintf(
         message,
         sizeof(message),
-        "Vendor Stock Refresh 2.0.2: %s; diagnostics=%s; placed=%llu; "
+        "Vendor Stock Refresh 2.1.0: %s; diagnostics=%s; placed=%llu; "
         "placementFailures=%llu; sent=%llu; received=%llu; armed=%llu; rejected=%llu.",
         Settings.enabled ? "active" : "disabled",
         Settings.diagnosticsEnabled ? "enabled" : "disabled",
@@ -938,7 +960,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!ReadConfiguration()) return false;
     if (!Settings.enabled) {
         context->LogInfo(
-            "VendorStockRefresh 2.0.2 by RuffnecKk loaded disabled; no hook or service registered.");
+            "VendorStockRefresh 2.1.0 by RuffnecKk loaded disabled; no hook or service registered.");
         return true;
     }
 
@@ -1025,7 +1047,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
 
     context->LogInfo(
-        "VendorStockRefresh 2.0.2 by RuffnecKk active; native button uses the runtime gold anchor.");
+        "VendorStockRefresh 2.1.0 by RuffnecKk active; native button uses the runtime gold anchor.");
     return true;
 }
 

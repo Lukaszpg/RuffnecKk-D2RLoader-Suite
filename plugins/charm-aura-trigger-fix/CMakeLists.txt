@@ -3,7 +3,10 @@ add_library(ruffneckk_charm_aura_trigger_fix SHARED
     src/plugin.rc
 )
 
-target_link_libraries(ruffneckk_charm_aura_trigger_fix PRIVATE RuffnecKk::Common)
+target_link_libraries(ruffneckk_charm_aura_trigger_fix PRIVATE
+    RuffnecKk::Common
+    RuffnecKk::NativeStatCompat
+)
 target_compile_features(ruffneckk_charm_aura_trigger_fix PRIVATE cxx_std_20)
 set_target_properties(ruffneckk_charm_aura_trigger_fix PROPERTIES
     OUTPUT_NAME "d2rl-ruffneckk-charm-aura-trigger-fix"

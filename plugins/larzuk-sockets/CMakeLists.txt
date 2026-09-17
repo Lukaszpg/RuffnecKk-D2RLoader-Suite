@@ -11,7 +11,10 @@ add_library(ruffneckk_larzuk_sockets SHARED
     src/plugin.rc
 )
 
-target_link_libraries(ruffneckk_larzuk_sockets PRIVATE RuffnecKk::Common)
+target_link_libraries(ruffneckk_larzuk_sockets PRIVATE
+    RuffnecKk::Common
+    RuffnecKk::NativeStatCompat
+)
 target_compile_features(ruffneckk_larzuk_sockets PRIVATE cxx_std_20)
 target_include_directories(ruffneckk_larzuk_sockets PRIVATE src)
 target_include_directories(

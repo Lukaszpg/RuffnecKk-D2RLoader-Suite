@@ -11,7 +11,11 @@ add_library(ruffneckk_mass_identify SHARED
     src/plugin.rc
 )
 
-target_link_libraries(ruffneckk_mass_identify PRIVATE RuffnecKk::Common user32)
+target_link_libraries(ruffneckk_mass_identify PRIVATE
+    RuffnecKk::Common
+    RuffnecKk::NativeStatCompat
+    user32
+)
 target_compile_features(ruffneckk_mass_identify PRIVATE cxx_std_20)
 set_target_properties(ruffneckk_mass_identify PROPERTIES
     OUTPUT_NAME "d2rl-ruffneckk-mass-identify"

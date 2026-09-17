@@ -1,4 +1,5 @@
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include "policy.hpp"
 
@@ -29,7 +30,6 @@ constexpr std::uintptr_t GetStatListRva = 0x34B870;
 constexpr std::uintptr_t CheckItemTypeRva = 0x373890;
 constexpr std::uintptr_t GetFirstItemRva = 0x388C10;
 constexpr std::uintptr_t GetNextItemRva = 0x38ABA0;
-constexpr std::uintptr_t MergeStatListsRva = 0x2F81A0;
 constexpr std::uintptr_t IsCharmUsableRva = 0x36AE00;
 constexpr std::uintptr_t RefreshPlayerItemsRva = 0x46F220;
 constexpr std::uintptr_t GetSkillListRva = 0x34B6E0;
@@ -120,11 +120,6 @@ constexpr std::array<std::uint8_t, 14> ExpectedGetNextItem{
     0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48,
     0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x10
 };
-constexpr std::array<std::uint8_t, 15> ExpectedMergeStatLists{
-    0x48, 0x89, 0x5C, 0x24, 0x18,
-    0x48, 0x89, 0x6C, 0x24, 0x20,
-    0x57, 0x48, 0x83, 0xEC, 0x20
-};
 constexpr std::array<std::uint8_t, 32> ExpectedIsCharmUsableEntry{
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83,
     0xEC, 0x40, 0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xD9,
@@ -200,7 +195,6 @@ using GetStatListFn = std::uint8_t*(__fastcall*)(void*) noexcept;
 using CheckItemTypeFn = std::int32_t(__fastcall*)(void*, std::int32_t) noexcept;
 using GetFirstItemFn = void*(__fastcall*)(void*) noexcept;
 using GetNextItemFn = void*(__fastcall*)(void*) noexcept;
-using MergeStatListsFn = void(__fastcall*)(void*, void*, std::int32_t) noexcept;
 using IsCharmUsableFn = std::int32_t(__fastcall*)(void*, void*) noexcept;
 using RefreshPlayerItemsFn = void(__fastcall*)(void*, void*) noexcept;
 using GetSkillListFn = std::uint8_t*(__fastcall*)(void*) noexcept;
@@ -219,7 +213,20 @@ GetStatListFn GetStatList{};
 CheckItemTypeFn CheckItemType{};
 GetFirstItemFn GetFirstItem{};
 GetNextItemFn GetNextItem{};
-MergeStatListsFn MergeStatLists{};
+// STATLIST_MergeStatLists at 0x2F81A0 is admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 IsCharmUsableFn IsCharmUsable{};
 RefreshPlayerItemsFn RefreshPlayerItems{};
 GetSkillListFn GetSkillList{};
@@ -246,7 +253,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-charm-aura-trigger-fix",
     .name = "Charm Aura Trigger Fix",
-    .version = "1.6.4",
+    .version = "1.7.0",
     .author = "RuffnecKk",
     .description = "Reactivates inventory charm auras after death, corpse recovery, and zone changes.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -415,7 +422,7 @@ void RefreshCharmAuras(void* player) noexcept {
         if (auto* statList = GetStatList(item)) {
             *reinterpret_cast<void**>(statList + StatListOwnerOffset) = nullptr;
         }
-        MergeStatLists(player, item, 1);
+        NativeStats.MergeStatLists(player, item, 1);
     }
     RestoreActiveSkill(
         player, activeSkills.left, SetLeftActiveSkill, SkillListLeftSkillOffset);
@@ -499,7 +506,7 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Charm Aura Trigger Fix 1.6.4: %s; diagnostics=%s; transitions=%llu; "
+        "Charm Aura Trigger Fix 1.7.0: %s; diagnostics=%s; transitions=%llu; "
         "corpse recoveries=%llu; native corpse refreshes=%llu; town respawns=%llu; "
         "native town refreshes=%llu; items scanned=%llu; aura charms refreshed=%llu; "
         "non-aura charms skipped=%llu; inactive charms skipped=%llu; active skills restored=%llu; active skill "
@@ -627,6 +634,17 @@ auto ValidateComposableInlineEntry(
 auto ValidateRuntime() noexcept -> bool {
     // SDK v3 has no mutation-batch API. Validate every hook, call-site witness,
     // helper, and shared entry before the first loader-owned hook is installed.
+    if (!NativeStats.BindCurrentProcess(
+            Base,
+            RuffnecKk::NativeStatCompat::ToMask(
+                RuffnecKk::NativeStatCompat::Helper::MergeStatLists))) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "CharmAuraTriggerFix: stat compatibility admission failed (%s).",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+        return false;
+    }
     return Check(
             ActTransitionRva,
             ExpectedActTransitionSignature.data(),
@@ -690,11 +708,6 @@ auto ValidateRuntime() noexcept -> bool {
             ExpectedGetNextItem.data(),
             ExpectedGetNextItem.size(),
             "next-item helper")
-        && Check(
-            MergeStatListsRva,
-            ExpectedMergeStatLists.data(),
-            ExpectedMergeStatLists.size(),
-            "merge-stat-lists helper")
         && ValidateComposableInlineEntry(
             IsCharmUsableRva,
             ExpectedIsCharmUsableEntry.data(),
@@ -796,7 +809,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!ReadConfiguration()) return false;
     if (!Settings.enabled) {
         context->LogInfo(
-            "Charm Aura Trigger Fix 1.6.4 by RuffnecKk loaded disabled; no hook or service registered.");
+            "Charm Aura Trigger Fix 1.7.0 by RuffnecKk loaded disabled; no hook or service registered.");
         return true;
     }
 
@@ -825,7 +838,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     CheckItemType = At<CheckItemTypeFn>(CheckItemTypeRva);
     GetFirstItem = At<GetFirstItemFn>(GetFirstItemRva);
     GetNextItem = At<GetNextItemFn>(GetNextItemRva);
-    MergeStatLists = At<MergeStatListsFn>(MergeStatListsRva);
     IsCharmUsable = At<IsCharmUsableFn>(IsCharmUsableRva);
     RefreshPlayerItems = At<RefreshPlayerItemsFn>(RefreshPlayerItemsRva);
     GetSkillList = At<GetSkillListFn>(GetSkillListRva);
@@ -854,7 +866,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     SetLeftActiveSkill = nullptr;
     GetSkillList = nullptr;
     RefreshPlayerItems = nullptr;
-    MergeStatLists = nullptr;
+    NativeStats.Reset();
     IsCharmUsable = nullptr;
     GetNextItem = nullptr;
     GetFirstItem = nullptr;

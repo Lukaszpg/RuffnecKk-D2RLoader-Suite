@@ -2,6 +2,7 @@
 
 #include "navigation_engine.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -71,6 +72,31 @@ inline constexpr float NativeAutomapLabelGap = 12.0F;
 inline constexpr float NativeWaypointLabelGap = 2.0F;
 inline constexpr float NativeShrineLabelGap = 18.0F;
 inline constexpr std::int32_t NativeShrineLabelProximitySubtiles = 56;
+inline constexpr float MinimumNativeAutomapViewportScale = 0.25F;
+inline constexpr float FullscreenNativeAutomapViewportRatio = 0.75F;
+
+[[nodiscard]] constexpr auto ResolveNativeAutomapViewportScale(
+        std::int32_t nativeWidth,
+        std::int32_t nativeHeight,
+        std::int32_t clipWidth,
+        std::int32_t clipHeight) noexcept -> float {
+    if (nativeWidth <= 0 || nativeHeight <= 0
+            || clipWidth <= 0 || clipHeight <= 0) {
+        return 1.0F;
+    }
+    const auto widthRatio = static_cast<float>(clipWidth)
+        / static_cast<float>(nativeWidth);
+    const auto heightRatio = static_cast<float>(clipHeight)
+        / static_cast<float>(nativeHeight);
+    if (widthRatio >= FullscreenNativeAutomapViewportRatio
+            && heightRatio >= FullscreenNativeAutomapViewportRatio) {
+        return 1.0F;
+    }
+    return std::clamp(
+        std::min(widthRatio, heightRatio),
+        MinimumNativeAutomapViewportScale,
+        1.0F);
+}
 
 struct AutomapLabelRectangle final {
     float left{};
@@ -669,6 +695,7 @@ struct NativeAutomapPoiSnapshot final {
     std::int32_t y{};
     std::int32_t nativeWidth{};
     std::int32_t nativeHeight{};
+    float nativeViewportScale{1.0F};
     std::int32_t sourceId{};
     AutomapPoiKind kind{AutomapPoiKind::ExitLabel};
     std::uint8_t stateFlags{};

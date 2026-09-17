@@ -19,7 +19,9 @@ inline constexpr std::uint32_t ChanceBasisPointScale = 10'000;
 struct RepairPolicy {
     bool pluginEnabled{true};
     bool enabled{};
-    std::int32_t maximumGold{std::numeric_limits<std::int32_t>::max()};
+    std::int32_t maximumGoldPerItem{std::numeric_limits<std::int32_t>::max()};
+    std::int32_t maximumGoldRepairAll{
+        std::numeric_limits<std::int32_t>::max()};
     bool durabilityWearEnabled{};
     double durabilityWearChance{};
     bool diagnosticsEnabled{};
@@ -40,7 +42,8 @@ inline auto ChanceToBasisPoints(double chance) noexcept -> std::uint32_t {
 }
 
 inline auto IsValidPolicy(const RepairPolicy& policy) noexcept -> bool {
-    return IsValidMaximumGold(policy.maximumGold)
+    return IsValidMaximumGold(policy.maximumGoldPerItem)
+        && IsValidMaximumGold(policy.maximumGoldRepairAll)
         && IsValidChance(policy.durabilityWearChance);
 }
 
@@ -96,7 +99,7 @@ inline auto ApplyRepairCostCap(
         || vanillaCost == std::numeric_limits<std::int32_t>::max()) {
         return vanillaCost;
     }
-    return std::min(vanillaCost, policy.maximumGold);
+    return std::min(vanillaCost, policy.maximumGoldPerItem);
 }
 
 inline auto ApplyRepairAllCap(
@@ -108,7 +111,7 @@ inline auto ApplyRepairAllCap(
         || adjustedItemTotal == std::numeric_limits<std::int32_t>::max()) {
         return adjustedItemTotal;
     }
-    return std::min(adjustedItemTotal, policy.maximumGold);
+    return std::min(adjustedItemTotal, policy.maximumGoldRepairAll);
 }
 
 inline auto GoldReduction(
@@ -208,7 +211,9 @@ inline auto ParseConfig(
     bool d2rlSection{};
     bool pluginEnabled{};
     bool repairEnabled{};
-    bool maximumGold{};
+    bool maximumGoldLegacy{};
+    bool maximumGoldPerItem{};
+    bool maximumGoldRepairAll{};
     bool wearEnabled{};
     bool chance{};
     bool diagnosticsEnabled{};
@@ -265,9 +270,23 @@ inline auto ParseConfig(
             repairEnabled = true;
             valid = ParseBoolean(value, parsed.enabled);
         } else if (section == "repair_costs" && key == "maximum_gold") {
-            if (maximumGold) return SetError(error, lineNumber, "duplicate setting");
-            maximumGold = true;
-            valid = ParseMaximumGold(value, parsed.maximumGold);
+            if (maximumGoldLegacy) {
+                return SetError(error, lineNumber, "duplicate setting");
+            }
+            maximumGoldLegacy = true;
+            valid = ParseMaximumGold(value, parsed.maximumGoldPerItem);
+        } else if (section == "repair_costs" && key == "maximum_gold_per_item") {
+            if (maximumGoldPerItem) {
+                return SetError(error, lineNumber, "duplicate setting");
+            }
+            maximumGoldPerItem = true;
+            valid = ParseMaximumGold(value, parsed.maximumGoldPerItem);
+        } else if (section == "repair_costs" && key == "maximum_gold_repair_all") {
+            if (maximumGoldRepairAll) {
+                return SetError(error, lineNumber, "duplicate setting");
+            }
+            maximumGoldRepairAll = true;
+            valid = ParseMaximumGold(value, parsed.maximumGoldRepairAll);
         } else if (section == "durability_wear" && key == "enabled") {
             if (wearEnabled) return SetError(error, lineNumber, "duplicate setting");
             wearEnabled = true;
@@ -288,8 +307,24 @@ inline auto ParseConfig(
         if (!valid) return SetError(error, lineNumber, "invalid setting value");
     }
 
+    if (maximumGoldLegacy && (maximumGoldPerItem || maximumGoldRepairAll)) {
+        error = "maximum_gold cannot be combined with maximum_gold_per_item or maximum_gold_repair_all";
+        return false;
+    }
+    if (!maximumGoldLegacy && (maximumGoldPerItem || maximumGoldRepairAll)
+        && !(maximumGoldPerItem && maximumGoldRepairAll)) {
+        error = "maximum_gold_per_item and maximum_gold_repair_all must be set together";
+        return false;
+    }
+
+    const bool legacyCaps = maximumGoldLegacy;
+    const bool modernCaps = maximumGoldPerItem && maximumGoldRepairAll;
+    if (legacyCaps) {
+        parsed.maximumGoldRepairAll = parsed.maximumGoldPerItem;
+    }
+
     if (!(repairSection && wearSection && repairEnabled
-            && maximumGold && wearEnabled && chance)
+            && (legacyCaps || modernCaps) && wearEnabled && chance)
         || pluginSection != pluginEnabled
         || diagnosticsSection != diagnosticsEnabled) {
         error = "one or more required settings are missing";

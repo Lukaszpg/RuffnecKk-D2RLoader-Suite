@@ -1,4 +1,5 @@
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include "policy.hpp"
 
@@ -16,9 +17,6 @@ namespace RuffnecKk::PreventMercDeathInTown {
 namespace {
 
 constexpr std::uintptr_t ApplyMonsterStatRegenRva = 0x448C00;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
-constexpr std::uintptr_t GetUnitBaseStatRva = 0x2F48C0;
-constexpr std::uintptr_t GetUnitBaseStatSignatureRva = GetUnitBaseStatRva + 5;
 constexpr std::uintptr_t CheckLifeStateMaskRva = 0x335E80;
 constexpr std::uintptr_t GetUnitRoomRva = 0x34B440;
 constexpr std::uintptr_t IsRoomInTownRva = 0x2F0750;
@@ -36,24 +34,6 @@ constexpr std::array<std::uint8_t, 32> ExpectedApplyMonsterStatRegen{
     0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xB6, 0x26,
     0x58, 0x02, 0x48, 0x33, 0xC4, 0x48, 0x89, 0x44,
     0x24, 0x70, 0x48, 0x8B, 0xFA, 0x45, 0x33, 0xC0
-};
-constexpr std::array<std::uint8_t, 32> ExpectedGetUnitStat{
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C,
-    0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57,
-    0x48, 0x83, 0xEC, 0x20, 0x41, 0x0F, 0xB7, 0xE8,
-    0x8B, 0xFA, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9
-};
-constexpr std::array<std::uint8_t, 5> ExpectedGetUnitBaseStatEntry{
-    0x48, 0x89, 0x5C, 0x24, 0x10
-};
-constexpr std::array<std::uint8_t, 50> ExpectedGetUnitBaseStatBody{
-    0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74,
-    0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x41,
-    0x0F, 0xB7, 0xE8, 0x8B, 0xDA, 0x48, 0x8B, 0xF9,
-    0x48, 0x85, 0xC9, 0x75, 0x2A, 0x88, 0x4C, 0x24,
-    0x30, 0x48, 0x8D, 0x4C, 0x24, 0x30, 0xE8, 0x00,
-    0xD2, 0xFF, 0xFF, 0x84, 0xC0, 0x74, 0x01, 0xCC,
-    0x33, 0xC0
 };
 constexpr std::array<std::uint8_t, 32> ExpectedCheckLifeStateMask{
     0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
@@ -89,8 +69,6 @@ static_assert(offsetof(UnitHeader, classId) == 0x04);
 
 using ApplyMonsterStatRegenFn = void(__fastcall*)(
     void*, void*, std::int32_t, std::int32_t) noexcept;
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    void*, std::int32_t, std::int32_t) noexcept;
 using CheckLifeStateMaskFn = std::int32_t(__fastcall*)(void*) noexcept;
 using GetUnitRoomFn = void*(__fastcall*)(void*) noexcept;
 using IsRoomInTownFn = std::int32_t(__fastcall*)(void*) noexcept;
@@ -102,8 +80,21 @@ const D2RL::PluginContext* Context{};
 std::uintptr_t Base{};
 Config Settings{};
 ApplyMonsterStatRegenFn OriginalApplyMonsterStatRegen{};
-GetUnitStatFn GetUnitStat{};
-GetUnitStatFn GetUnitBaseStat{};
+// STATLIST_GetUnitStat at 0x2F5020 and STATLIST_GetUnitBaseStat at 0x2F48C0
+// are admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 CheckLifeStateMaskFn CheckLifeStateMask{};
 GetUnitRoomFn GetUnitRoom{};
 IsRoomInTownFn IsRoomInTown{};
@@ -116,7 +107,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-prevent-merc-death-in-town",
     .name = "Prevent Merc Death in Town",
-    .version = "1.0.2",
+    .version = "1.1.0",
     .author = "RuffnecKk",
     .description = "Prevents mercenaries from dying to lingering damage while in town.",
     .flags = D2RL::PluginFlags::Server | D2RL::PluginFlags::NativeHooks,
@@ -153,78 +144,25 @@ auto ReadConfiguration() noexcept -> bool {
     return true;
 }
 
-auto ValidateComposableBaseStatEntry() noexcept -> bool {
-    if (!Context->CheckExpectedBytes(
-            GetUnitBaseStatSignatureRva,
-            ExpectedGetUnitBaseStatBody.data(),
-            static_cast<std::uint32_t>(ExpectedGetUnitBaseStatBody.size()))) {
-        Context->LogError(
-            "PreventMercDeathInTown: base-stat helper body signature mismatch.");
-        return false;
-    }
-    if (std::memcmp(
-            reinterpret_cast<const void*>(Base + GetUnitBaseStatRva),
-            ExpectedGetUnitBaseStatEntry.data(),
-            ExpectedGetUnitBaseStatEntry.size()) == 0) {
-        return true;
-    }
-
-    const D2RL::DiagnosticsServiceV1* diagnostics{};
-    if (Context->QueryService(
-            D2RL::ServiceId::Diagnostics,
-            D2RL::DiagnosticsServiceV1Version,
-            &diagnostics) != D2RL::ServiceQueryResult::Success
-        || !D2RL::HasDiagnosticsServiceV1Field(
-            diagnostics,
-            D2RL::DiagnosticsServiceV1RequiredSize)
-        || !diagnostics->queryHookStatus) {
-        Context->LogError(
-            "PreventMercDeathInTown: Diagnostics v1 is required to validate the shared base-stat entry.");
-        return false;
-    }
-
-    D2RL::Diagnostics::HookQuery query{
-        .structSize = D2RL::Diagnostics::HookQuerySize,
-        .rva = GetUnitBaseStatRva,
-        .expected = ExpectedGetUnitBaseStatEntry.data(),
-        .expectedSize = static_cast<std::uint32_t>(
-            ExpectedGetUnitBaseStatEntry.size()),
-    };
-    D2RL::Diagnostics::HookStatus status{
-        .structSize = D2RL::Diagnostics::HookStatusSize,
-    };
-    if (diagnostics->queryHookStatus(Context, &query, &status)
-            != D2RL::Diagnostics::Result::Success
-        || status.state != D2RL::Diagnostics::ModificationState::Tracked
-        || status.kind != D2RL::Diagnostics::ModificationKind::InlineHook
-        || status.ownerCount == 0) {
-        Context->LogError(
-            "PreventMercDeathInTown: base-stat entry has an untracked or non-composable modification.");
-        return false;
-    }
-
-    char message[224]{};
-    std::snprintf(
-        message,
-        sizeof(message),
-        "PreventMercDeathInTown: composing through loader-owned base-stat hook (%.*s).",
-        63,
-        status.ownerPluginId);
-    Context->LogInfo(message);
-    return true;
-}
-
 auto ValidateRuntime() noexcept -> bool {
     // Validate every native dependency before the single component mutation.
+    if (!NativeStats.BindCurrentProcess(
+            Base,
+            RuffnecKk::NativeStatCompat::ToMask(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+                | RuffnecKk::NativeStatCompat::ToMask(
+                    RuffnecKk::NativeStatCompat::Helper::GetUnitBaseStat))) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "PreventMercDeathInTown: stat compatibility admission failed (%s).",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+        return false;
+    }
     return Context->CheckExpectedBytes(
             ApplyMonsterStatRegenRva,
             ExpectedApplyMonsterStatRegen.data(),
             static_cast<std::uint32_t>(ExpectedApplyMonsterStatRegen.size()))
-        && Context->CheckExpectedBytes(
-            GetUnitStatRva,
-            ExpectedGetUnitStat.data(),
-            static_cast<std::uint32_t>(ExpectedGetUnitStat.size()))
-        && ValidateComposableBaseStatEntry()
         && Context->CheckExpectedBytes(
             CheckLifeStateMaskRva,
             ExpectedCheckLifeStateMask.data(),
@@ -252,11 +190,11 @@ auto IsLethalHirelingTickInTown(void* game, void* unit) noexcept -> bool {
             return false;
         }
 
-        auto regeneration = GetUnitStat(unit, HitpointRegenStat, 0);
+        auto regeneration = NativeStats.GetUnitStat(unit, HitpointRegenStat, 0);
         if (CheckLifeStateMask(unit)) {
-            regeneration -= GetUnitBaseStat(unit, HitpointRegenStat, 0);
+            regeneration -= NativeStats.GetUnitBaseStat(unit, HitpointRegenStat, 0);
         }
-        const auto hitpoints = GetUnitStat(unit, HitpointsStat, 0);
+        const auto hitpoints = NativeStats.GetUnitStat(unit, HitpointsStat, 0);
         if (!IsProjectedLethal(hitpoints, regeneration)) return false;
 
         auto* room = GetUnitRoom(unit);
@@ -311,7 +249,7 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Prevent Merc Death in Town 1.0.2: %s; diagnostics=%s; "
+        "Prevent Merc Death in Town 1.1.0: %s; diagnostics=%s; "
         "prevented lethal ticks=%llu.",
         Settings.enabled ? "active" : "disabled",
         Settings.diagnosticsEnabled ? "enabled" : "disabled",
@@ -344,7 +282,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!ReadConfiguration()) return false;
     if (!Settings.enabled) {
         context->LogInfo(
-            "Prevent Merc Death in Town 1.0.2 by RuffnecKk loaded disabled; no hook or service registered.");
+            "Prevent Merc Death in Town 1.1.0 by RuffnecKk loaded disabled; no hook or service registered.");
         return true;
     }
 
@@ -367,8 +305,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         return false;
     }
 
-    GetUnitStat = At<GetUnitStatFn>(GetUnitStatRva);
-    GetUnitBaseStat = At<GetUnitStatFn>(GetUnitBaseStatRva);
     CheckLifeStateMask = At<CheckLifeStateMaskFn>(CheckLifeStateMaskRva);
     GetUnitRoom = At<GetUnitRoomFn>(GetUnitRoomRva);
     IsRoomInTown = At<IsRoomInTownFn>(IsRoomInTownRva);
@@ -401,8 +337,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     IsRoomInTown = nullptr;
     GetUnitRoom = nullptr;
     CheckLifeStateMask = nullptr;
-    GetUnitBaseStat = nullptr;
-    GetUnitStat = nullptr;
+    NativeStats.Reset();
     OriginalApplyMonsterStatRegen = nullptr;
     PreventedDeaths.store(0, std::memory_order_relaxed);
     DiagnosticLogs.store(0, std::memory_order_relaxed);

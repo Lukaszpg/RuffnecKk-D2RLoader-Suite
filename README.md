@@ -2,18 +2,19 @@
 
 
 
-This Suite contains 24 independent plugins and 17 optional memory patches. The
-ISC12 download also includes the offline D2R Save Converter. You can install
-one component, a few favorites, or the complete bundles.
+The published Suite contains 23 independent plugins and 18 optional
+memory patches. You can install one component, a few favorites, or the complete
+bundles.
 
 ## Requirements
 
 - Diablo II: Resurrected **3.3.93847**, **3.2.92777**, or Steam **3.3.93787**.
 
-- **D2RLoader 1.2.1** (tested with beta preview 10)
+- **D2RLoader 1.3** for the published Suite 1.4 release.
 
 
 Download D2RLoader from [D2RLoader.net](https://d2rloader.net/).
+
 
 ## What should I download?
 
@@ -54,10 +55,6 @@ Custom's `d2rloader/` folder, then restart D2RMM Custom or choose
 **Plugins > Refresh**. Required companion files such as the MapSense map
 generator are imported automatically.
 
-The ISC12 ZIP also contains the offline D2R Save Converter in its own folder.
-D2RMM Custom installs ISC12, but the Converter must be extracted and launched
-manually when you need it.
-
 ### Upgrading to Suite 1.3.x
 
 D2RLoader 1.2 now provides the ground-item label limit feature natively. Remove
@@ -71,20 +68,6 @@ d2rloader/patches/ruffneckk-ground-item-label-limit-128.json
 Normal Area Scaling is also no longer distributed by the Suite because Yinyin
 has a working patch and mine apparently didn't work.
 
-
-## Important compatibility note
-
-Do not use this Suite together with the old Community Pack files:
-
-- `plugin-items.dll`
-- `plugin-levels.dll`
-- `plugin-misc.dll`
-- `plugin-quests.dll`
-- `plugin-skills.dll`
-
-Those older combined DLLs are no longer supported.
-
-Feel free to install back Eezstreet's plugin pack : https://github.com/eezstreet/D2RL-Plugins
 
 ## Plugins
 
@@ -100,24 +83,23 @@ control.
 | Mass Identify | Identifies items by Shift-right-clicking a Tome of Identify. | Free identification and optional Cube or stash coverage. |
 | Potion Auto Pickup | Sends ground potions to matching belt columns or inventory. | Potion priorities, belt columns, and inventory overflow. |
 | Remote Stash | Opens personal and shared stash pages from anywhere. | Hotkey, Inventory button, placement, size, custom sprites, and active-MPQ skin overrides. |
-| Vendor Stock Refresh | Adds a button that refreshes normal vendor stock. | No extra options. |
+| Vendor Stock Refresh | Adds a button that refreshes vendors stock screens. | No extra options. |
 | Bulk Skill Point Allocation | Uses Ctrl+Click for a batch and Shift+Click for all usable skill points. | Batch size and confirmation text. |
 | Charm Aura Trigger Fix | Restores inventory charm auras after respawns and zone transitions | No extra options. |
 | Ethereal Item Rules | Controls which items can become ethereal and how often. | Chance, excluded item types, Set items, and Indestructible items. |
 | Item Durability | Adjusts durability loss and can give bows durability. | Loss resistance, ethereal durability, and bow durability. |
-| Larzuk Sockets | Controls Larzuk's socket reward by difficulty and item quality. | Minimum and maximum sockets by quality. |
+| Larzuk Sockets | Allows tweaking Larzuk's socket reward by difficulty and item quality. | Minimum and maximum sockets rewarded (by quality). |
 | Progressive Affixes | Controls how many affixes Magic, Rare, and Crafted items receive. | Automatic or progressive item-level rules. |
 | Repair Costs Cap | Limits repair prices and can add permanent durability wear. | Gold cap and wear chance. |
 | Enhanced Damage Min/Max Fix | Fixes off-weapon Enhanced Damage with flat damage bonuses. | No extra options. |
-| Burn Damage Fix **NEW** | Restores and fixes Burn damage, adds a new overlay from Burning state, now goes through resistances and fire mastery is applied.| No extra options. |
+| Burn Damage Fix | For modders. Restores and fixes Burn damage, adds a new fire overlay from Burning state, now goes through resistances + fire mastery is applied.| No extra options. |
 | Floating Damage | Shows damage numbers and an optional DPS counter. | Colors, size, animation, layout, font, combining, and Controls binding. |
-| Prevent Merc Death in Town | Stops supported lingering damage from killing mercenaries in town (Open wounds, poison). | No extra options. |
-| Cast Triggers **NEW** | Unlocks new CtC ideas : X% CtC X Skill when X skill is cast, CtC from OW, CB, Attack attempts and more | Trigger families, conditions, skills |
-| Armageddon-Hurricane CtC Fix **NEW** | Lets Armageddon and Hurricane start correctly from chance-to-cast effects. | Supported skills |
-| Resistance Floor **NEW** | Lets configured units fall below the vanilla resistance floor. | Player, companion, monster, and Character Screen limits. |
-| MapSense **NEW** | Reveals maps, marks important targets, and draws navigation lines on D2R's native automap. | In-game menu, colors, markers, navigation, themes, and custom destinations. |
-| Extended Act Level IDs **NEW** | Allows custom levels to belong to any act. | No extra options. |
-| ISC12 **NEW** | Extends ItemStatCost IDs to 12 bits for larger mod stat catalogs (4095 max rows) and includes D2R Save Converter. | No extra options. |
+| Prevent Merc Death in Town | Stops lingering damage from killing mercenaries in town (Open wounds, poison). | No extra options. |
+| Cast Triggers | For modders. Unlocks new CtC ideas : X% CtC X Skill when X skill is cast, CtC from OW, CB, Attack attempts and more | Trigger families, conditions, skills |
+| Armageddon-Hurricane CtC Fix | Lets Armageddon and Hurricane start correctly from chance-to-cast effects. |  |
+| Resistance Floor | Lowers resistances floors for characters, minions or monsters all below the vanilla resistance floor (used to be -100, now unlocked at -1000) | Limits for each category |
+| MapSense | Reveals maps, marks important targets, and draws GPS route lines around corridors, doors, walls, and other obstacles. | Walk/Run and Teleport routes, in-game menu, colors, markers, themes, and custom destinations. |
+| PlayerX Scaling Tweaks **NEW** | Expands `/players` controls and replaces the older Player Difficulty Overrides patch. | #of plyaers limit, force a minimum difficulty setting, monster xp/hp scaling caps, optional NoDrop party simulation, and optional Battle.net-style scaling. |
 
 ### Default hotkeys
 
@@ -128,13 +110,6 @@ control.
 These bindings are configurable in D2RLoader Controls. D2RLoader's current
 Input service supports keyboard bindings, but not mouse buttons.
 
-## D2R Save Converter
-
-D2R Save Converter 1.0.0 is included only in the individual ISC12 ZIP. Extract
-its folder before running the executable. It converts standard D2R and ISC12
-saves without launching the game. Back up characters and shared stashes, close
-the game, and review the source and destination shown before converting.
-
 ## Memory patches
 
 A memory patch is a small optional rule change. Installing its JSON file
@@ -143,21 +118,22 @@ enables the complete behavior; removing the file disables it after a restart.
 | Patch | What changes for the player |
 |---|---|
 | -% to Enemy Resistance vs Immunes | -% to enemy res can affect immune monsters. |
+| Four Character Item Codes **NEW** | Allows modders to use four-character item codes, expanding the previous three-character limit. |
 | Gamble Screen Limit | Raises Gamble screen from 14 items to 32. |
 | Gold Capacities | Greatly raises carried-gold and stash-gold limits. |
 | Ranged Hireling AI | Improves following, activity, and retreat behavior for ranged mercenaries. |
 | Hit Chance 0% to 100% | Replaces the normal 5%-95% gameplay and Character Screen hit-chance limits with 0%-100%. |
 | Infinite Quantities | Stops ammunition, throwing weapons, and tomes from consuming quantity. |
-| Infinite Quest Rewards | Allows the Anya, Charsi, and Larzuk rewards to be reused. |
+| Infinite Quest Rewards | Allows the Anya, Charsi, and Larzuk rewards to be reused |
 | ITD vs Champions and Uniques | Extends Ignore Target Defense to champions and unique monsters. |
 | Level 100+ Characters | Allows characters above level 99 to join games. |
 | Linear Magic Find | Uses a linear Magic Find formula without diminishing returns. |
 | Maximum Staffmods | Gives eligible items three random +1 to +3 staffmods. |
+| No Gold Loss on Death **NEW** | No more losing or dropping gold upon death. |
 | No Run Penalties | Keeps full defense and block chance while running. |
-| Player Difficulty Overrides | Allows `/players` values above 8, up to 65,535. |
 | Preserve Terror Zone Music | Keeps an area's normal music while it is terrorized. |
 | Quantity Display Fix | Restores quantity display on affected stackable items. |
-| Shadow Master AI Fix **NEW** | Keeps Shadow Warrior and Shadow Master targeting independent from their owner. |
+| Shadow Master AI Fix | Fixes Shadow Master (and Warrior) AI that kept targeting same targets as it owners |
 | Thorns/Burn Kill Credit | Restores experience and kill credit for reflected or burning kills. |
 
 For complete Burn damage behavior, install Burn Damage Fix together with the
@@ -166,12 +142,9 @@ experience and kill attribution.
 
 ## Source code
 
-The source code for all 24 Suite plugins is available under `plugins/`.
+The source code for the Suite plugins is available under `plugins/`.
 Each plugin keeps its own build files, source, configuration, and tests when
-applicable. MapSense also includes its map generator source under
-`plugins/mapsense/mapgen/`.
-
-
+applicable.
 
 ## Changing or removing features
 

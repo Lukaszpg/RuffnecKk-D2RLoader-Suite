@@ -1,4 +1,5 @@
 #include "native_automap_poi.hpp"
+#include "native_object_interact_contract.hpp"
 
 #include "mapsense_data_catalog.hpp"
 #include "reveal_engine.hpp"
@@ -24,8 +25,7 @@ namespace {
 constexpr std::uintptr_t GetUnitByIdAndTypeRva = 0x09A5D0;
 constexpr std::uintptr_t GetUnitIdRva = 0x34A330;
 constexpr std::uintptr_t GetUnitModeRva = 0x34AB60;
-constexpr std::uintptr_t GetObjectInteractTypeRva = 0x34AD40;
-constexpr std::uintptr_t ObjectInteractTypeLayoutWitnessRva = 0x34AD61;
+constexpr auto GetObjectInteractTypeRva = Detail::ObjectInteractGetterRva;
 constexpr std::uintptr_t GetObjectRuntimeFlagsC8Rva = 0x4903D0;
 constexpr std::uintptr_t GetUnitClientXRva = 0x34AF60;
 constexpr std::uintptr_t GetUnitClientYRva = 0x34AFB0;
@@ -1025,6 +1025,11 @@ void ProjectTrackedObjectsLocked(
         const NativeAutomapPoiPass& pass,
         std::uint32_t mask,
         std::size_t& count) noexcept {
+    const auto nativeViewportScale = ResolveNativeAutomapViewportScale(
+        pass.nativeWidth,
+        pass.nativeHeight,
+        pass.clipWidth,
+        pass.clipHeight);
     __try {
         if (GetUnitByIdAndType == nullptr || GetUnitMode == nullptr
                 || GetObjectInteractType == nullptr
@@ -1125,6 +1130,7 @@ void ProjectTrackedObjectsLocked(
                     .y = projected.y,
                     .nativeWidth = pass.nativeWidth,
                     .nativeHeight = pass.nativeHeight,
+                    .nativeViewportScale = nativeViewportScale,
                     .sourceId = sourceId,
                     .kind = kind,
                     .stateFlags = stateFlags,
@@ -1219,17 +1225,6 @@ void ProjectSpecialChestPresetsLocked(
         0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C,
         0x24, 0x30, 0x48, 0x8D, 0x4C, 0x24, 0x30, 0xE8,
         0x94, 0x9D, 0xFF, 0xFF, 0x84, 0xC0, 0x74, 0x01};
-    constexpr std::array<std::uint8_t, 32> objectInteractTypeExpected{
-        0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
-        0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C,
-        0x24, 0x30, 0x48, 0x8D, 0x4C, 0x24, 0x30, 0xE8,
-        0x84, 0xA8, 0xFF, 0xFF, 0x84, 0xC0, 0x74, 0x01};
-    constexpr std::array<std::uint8_t, 39> objectLayoutExpected{
-        0x83, 0x3B, 0x02, 0x74, 0x14, 0x48, 0x8D, 0x4C,
-        0x24, 0x30, 0xC6, 0x44, 0x24, 0x30, 0x00, 0xE8,
-        0x3B, 0x9E, 0xFF, 0xFF, 0x84, 0xC0, 0x74, 0x01,
-        0xCC, 0x48, 0x8B, 0x43, 0x10, 0x0F, 0xB6, 0x40,
-        0x08, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3};
     constexpr std::array<std::uint8_t, 59> objectRuntimeFlagsC8Expected{
         0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
         0xD9, 0x48, 0x85, 0xC9, 0x75, 0x20, 0x88, 0x4C,
@@ -1277,6 +1272,23 @@ void ProjectSpecialChestPresetsLocked(
             expected.data(),
             static_cast<std::uint32_t>(expected.size()));
     };
+    const auto checkObjectInteract = [context]() noexcept {
+        const auto contract = Detail::ValidateObjectInteractContract(
+            context->exeBase,
+            [](std::uintptr_t address, std::span<std::uint8_t> bytes) noexcept {
+                return Detail::ReadObjectInteractCode(
+                    GetCurrentProcess(), address, bytes);
+            });
+        if (contract == Detail::ObjectInteractContract::Unsupported) {
+            context->LogError(
+                "MapSense: object interaction accessors matched neither the complete native byte contract nor the split-byte 16-bit contract; POIs and Reveal Map refused.");
+            return false;
+        }
+        context->LogInfo(contract == Detail::ObjectInteractContract::NativeByte
+            ? "MapSense: object interaction accessors verified (native byte contract)."
+            : "MapSense: object interaction accessors verified (split-byte 16-bit contract; both relays and return targets checked).");
+        return true;
+    };
     return check(GetUnitIdRva, getUnitIdExpected)
         && check(
             NativeUnitIdentityLayoutWitnessRva,
@@ -1284,8 +1296,7 @@ void ProjectSpecialChestPresetsLocked(
         && check(GetUnitModeRva, getUnitModeExpected)
         && check(GetUnitClientXRva, getXExpected)
         && check(GetUnitClientYRva, getYExpected)
-        && check(GetObjectInteractTypeRva, objectInteractTypeExpected)
-        && check(ObjectInteractTypeLayoutWitnessRva, objectLayoutExpected)
+        && checkObjectInteract()
         && check(
             GetObjectRuntimeFlagsC8Rva,
             objectRuntimeFlagsC8Expected)

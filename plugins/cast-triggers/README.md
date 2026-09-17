@@ -1,4 +1,4 @@
-# Cast Triggers 1.0.0
+# Cast Triggers 1.1.0
 
 Cast Triggers adds Path of Exile-style skill procs to Diablo II: Resurrected
 items.

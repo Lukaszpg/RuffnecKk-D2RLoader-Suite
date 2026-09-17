@@ -2,7 +2,8 @@
 #include <D2RLPlugin/diagnostics.h>
 #include <D2RLPlugin/inventory.h>
 #include <D2RLPlugin/item.h>
-#include <D2RLPlugin/localization.h>
+#include <RuffnecKk/localization.hpp>
+#include <RuffnecKk/native_stat_compat.hpp>
 #include <D2RLPlugin/shared_events.h>
 
 #include "policy.hpp"
@@ -30,7 +31,6 @@ constexpr std::uint64_t HoverLifetimeMilliseconds = 1'500;
 constexpr std::uintptr_t QueueOutgoingPacketRva = 0x0EE2A0;
 constexpr std::uintptr_t TargetingPacketWorkerRva = 0x1C7A30;
 constexpr std::uintptr_t IsVirtualKeyDownRva = 0x120A100;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
 constexpr std::uintptr_t CheckStateRva = 0x3351B0;
 constexpr std::uintptr_t GetUnitIdRva = 0x34A330;
 constexpr std::uintptr_t GetUnitInventoryRva = 0x34A360;
@@ -86,10 +86,6 @@ constexpr std::array<std::uint8_t, 32> SynchronizeQuantityExpected{
     0x24, 0x10, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56,
     0x41, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x49, 0x8B,
     0xF8, 0x48, 0x8B, 0xDA, 0x45, 0x33, 0xC0, 0x48,
-};
-constexpr std::array<std::uint8_t, 16> GetUnitStatExpected{
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C,
-    0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57,
 };
 constexpr std::array<std::uint8_t, 32> CheckStateExpected{
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74,
@@ -224,8 +220,6 @@ using CheckItemFlagFn = std::int32_t(__fastcall*)(
     void*, std::uint32_t) noexcept;
 using SetItemFlagFn = void(__fastcall*)(
     void*, std::uint32_t, std::int32_t) noexcept;
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    void*, std::int32_t, std::int32_t) noexcept;
 using CheckStateFn = std::int32_t(__fastcall*)(
     void*, std::int32_t) noexcept;
 using IdentifyItemFn = void(__fastcall*)(
@@ -240,7 +234,7 @@ Config Settings{};
 const D2RL::SharedEventServiceV1* SharedEventService{};
 const D2RL::ItemServiceV1* ItemService{};
 const D2RL::InventoryServiceV1* InventoryService{};
-const D2RL::LocalizationServiceV1* LocalizationService{};
+RuffnecKk::Localization::Service LocalizationService;
 D2RL::SharedEvents::ListenerHandle TooltipListenerHandle{};
 
 QueueOutgoingPacketFn QueueOutgoingPacket{};
@@ -262,7 +256,20 @@ GetNextCorpseFn GetNextCorpse{};
 GetCorpseUnitIdFn GetCorpseUnitId{};
 CheckItemFlagFn CheckItemFlag{};
 SetItemFlagFn SetItemFlag{};
-GetUnitStatFn GetUnitStat{};
+// STATLIST_GetUnitStat at 0x2F5020 is admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 CheckStateFn CheckState{};
 IdentifyItemFn IdentifyItem{};
 SynchronizeQuantityFn SynchronizeQuantity{};
@@ -292,7 +299,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-mass-identify",
     .name = "MassID",
-    .version = "2.0.3",
+    .version = "2.1.0",
     .author = "RuffnecKk",
     .description = "Identifies selected item containers from an Identify Tome.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -366,9 +373,6 @@ auto QueryRequiredServices() noexcept -> bool {
     constexpr auto InventoryCursorFieldEnd = static_cast<std::uint32_t>(
         offsetof(D2RL::InventoryServiceV1, getCursorItem)
         + sizeof(D2RL::Inventory::GetCursorItemFn));
-    constexpr auto LocalizationKeyFieldEnd = static_cast<std::uint32_t>(
-        offsetof(D2RL::LocalizationServiceV1, getStringByKey)
-        + sizeof(D2RL::Localization::GetStringByKeyFn));
 
     if (Context->QueryService(
             D2RL::ServiceId::SharedEvent,
@@ -402,15 +406,9 @@ auto QueryRequiredServices() noexcept -> bool {
             "MassID: InventoryService v1 local-player inspection is unavailable.");
         return false;
     }
-    if (Context->QueryService(
-            D2RL::ServiceId::Localization,
-            D2RL::LocalizationServiceV1Version,
-            &LocalizationService) != D2RL::ServiceQueryResult::Success
-        || !D2RL::HasLocalizationServiceV1Field(
-            LocalizationService, LocalizationKeyFieldEnd)
-        || LocalizationService->getStringByKey == nullptr) {
+    if (!LocalizationService.Bind(Context)) {
         Context->LogError(
-            "MassID: LocalizationService v1 key lookup is unavailable.");
+            "MassID: Localization service key lookup is unavailable or malformed.");
         return false;
     }
     return true;
@@ -531,8 +529,18 @@ auto ValidateRuntime() noexcept -> bool {
         SynchronizeQuantityRva,
         SynchronizeQuantityExpected,
         "Tome quantity synchronizer") && valid;
-    valid = Check(GetUnitStatRva, GetUnitStatExpected, "unit-stat helper")
-        && valid;
+    const bool nativeStatsValid = NativeStats.BindCurrentProcess(
+        reinterpret_cast<std::uintptr_t>(Base),
+        RuffnecKk::NativeStatCompat::ToMask(
+            RuffnecKk::NativeStatCompat::Helper::GetUnitStat));
+    if (!nativeStatsValid) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "MassID: stat compatibility admission failed (%s).",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+    }
+    valid = nativeStatsValid && valid;
     valid = Check(CheckStateRva, CheckStateExpected, "state helper")
         && valid;
     valid = Check(GetUnitIdRva, GetUnitIdExpected, "unit-id helper")
@@ -607,7 +615,6 @@ void BindNativeFunctions() noexcept {
     GetCorpseUnitId = At<GetCorpseUnitIdFn>(GetCorpseUnitIdRva);
     CheckItemFlag = At<CheckItemFlagFn>(CheckItemFlagRva);
     SetItemFlag = At<SetItemFlagFn>(SetItemFlagRva);
-    GetUnitStat = At<GetUnitStatFn>(GetUnitStatRva);
     CheckState = At<CheckStateFn>(CheckStateRva);
     IdentifyItem = At<IdentifyItemFn>(IdentifyItemRva);
     SynchronizeQuantity = At<SynchronizeQuantityFn>(SynchronizeQuantityRva);
@@ -816,10 +823,11 @@ auto TryInstallGameMessageHook() noexcept -> bool {
 auto CurrentMassIdentifyTooltipText() noexcept -> std::string_view {
     std::array<char, 128> localized{};
     std::uint32_t requiredSize{};
-    if (LocalizationService == nullptr
-        || LocalizationService->getStringByKey(
+    if (!LocalizationService
+        || LocalizationService.GetStringByKey(
             Context,
             "ItemStats1h",
+            "d2r:ItemStats1h",
             localized.data(),
             static_cast<std::uint32_t>(localized.size()),
             &requiredSize) != D2RL::Localization::Result::Success) {
@@ -1028,7 +1036,7 @@ std::int32_t __fastcall HookCainIdentifyCallback(
     // Preserve the public behavior: leave the Tome in place and clear only
     // the targeting flag before the authoritative identify pass.
     SetItemFlag(tome, 0x00000004u, 0);
-    const auto quantity = GetUnitStat(
+    const auto quantity = NativeStats.GetUnitStat(
         tome, static_cast<std::int32_t>(QuantityStat), 0);
     const auto budget = IdentificationBudget(
         Settings.freeIdentification, quantity);
@@ -1201,7 +1209,7 @@ void ClearNativeBindings() noexcept {
     SynchronizeQuantity = nullptr;
     IdentifyItem = nullptr;
     CheckState = nullptr;
-    GetUnitStat = nullptr;
+    NativeStats.Reset();
     SetItemFlag = nullptr;
     CheckItemFlag = nullptr;
     GetCorpseUnitId = nullptr;
@@ -1277,7 +1285,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     SharedEventService = nullptr;
     ItemService = nullptr;
     InventoryService = nullptr;
-    LocalizationService = nullptr;
+    LocalizationService.Reset();
     TooltipListenerHandle = D2RL::SharedEvents::InvalidHandle;
     PluginActive.store(false, std::memory_order_release);
     ResetCounters();
@@ -1345,7 +1353,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     RemoveGameMessageHook();
     ClearHoverState();
     ClearNativeBindings();
-    LocalizationService = nullptr;
+    LocalizationService.Reset();
     InventoryService = nullptr;
     ItemService = nullptr;
     SharedEventService = nullptr;

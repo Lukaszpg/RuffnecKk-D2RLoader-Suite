@@ -1997,3 +1997,471 @@ index 0672610..72392f5 100644
  /// The unique DT1 file rel paths every level of `act_no` references (LvlTypes File
  /// columns; seed-independent). The browser fetches these, registers them via
  /// dt1RegisterFile, then calls generateActTilesAll. Caller owns the outer slice
+diff --git a/packages/pathfinding/src/nav.zig b/packages/pathfinding/src/nav.zig
+index b56352a..9b7c168 100644
+--- a/packages/pathfinding/src/nav.zig
++++ b/packages/pathfinding/src/nav.zig
+@@ -84,9 +84,9 @@ pub const Nav = struct {
+         return pm;
+     }
+
+-    fn maskIndex(self: *Nav, mask: u16) ?usize {
++    fn maskIndex(self: *Nav, mask: u16, footprint: grid.Footprint) ?usize {
+         for (self.maps.items, 0..) |m, i| {
+-            if (m.mask == mask and m.footprint == .point) return i;
++            if (m.mask == mask and m.footprint == footprint) return i;
+         }
+         return null;
+     }
+@@ -95,8 +95,13 @@ pub const Nav = struct {
+     /// centre, or -1. This is what makes the teleport search cheap — it searches 25x fewer nodes
+     /// than the subtile grid, and every node already knows a legal place to land.
+     pub fn tileReps(self: *Nav, mask: u16) ![]const i32 {
+-        const pm = try self.passMap(mask);
+-        const idx = self.maskIndex(mask).?;
++        return self.tileRepsFor(mask, .point);
++    }
++
++    /// Landing caches must use the same footprint as the route's passability map.
++    pub fn tileRepsFor(self: *Nav, mask: u16, footprint: grid.Footprint) ![]const i32 {
++        const pm = try self.passMapFor(mask, footprint);
++        const idx = self.maskIndex(mask, footprint).?;
+         if (self.tile_reps.items[idx].len != 0) return self.tile_reps.items[idx];
+
+         const tw = self.lv.tileW();
+diff --git a/packages/pathfinding/src/router.zig b/packages/pathfinding/src/router.zig
+index 3d47154..2555e2f 100644
+--- a/packages/pathfinding/src/router.zig
++++ b/packages/pathfinding/src/router.zig
+@@ -100,6 +100,12 @@ pub const Options = struct {
+     /// Movement collision model. The default is what a walking player uses; hand it
+     /// `Colmask.monster_path` for a monster or `Colmask.missile_flight` to trace a projectile.
+     mask: u16 = collision.Colmask.player_path,
++    /// Explicit caller footprint; legacy callers retain their point model.
++    footprint: grid.Footprint = .point,
++    /// Apply the D2R Levels.Teleport=2 coordinate trace within a level.
++    teleport_gated_trace: bool = false,
++    /// Consumers may decline unqualified object-pad transitions.
++    allow_pads: bool = true,
+     /// Teleport instead of walking wherever the level permits it. Levels that forbid teleport
+     /// (Levels.txt Teleport = 0) fall back to walking automatically.
+     teleport: bool = false,
+@@ -145,7 +151,6 @@ pub const Error = error{
+     NoLevelRoute,
+ } || astar.Error || teleport.Error;
+
+-
+ /// Routing over a world, plus the caches that make it fast. Borrows the world; does not own it,
+ /// because a running game owns its world and merely asks this for directions.
+ pub const Router = struct {
+@@ -346,14 +351,16 @@ pub const Router = struct {
+     /// Picks the pair with the shortest cast among all candidate links.
+     pub fn crossLevelCast(self: *Router, from: *Level, to: *Level, opts: Options) !?LevelCast {
+         const max_cast = opts.teleport_max_cast orelse return null;
++        // A flat level cannot prove a trace across two independently loaded grids.
++        if (opts.teleport_gated_trace and from.teleport == .gated) return null;
+         // The Levels.txt rule that applies is the CASTER'S — `Skills_SrvDoFunc_027_Teleport` reads
+         // it from `GetRoom(pUnit)`, the room you are standing in — so `from` decides both whether
+         // the cast happens at all and what extra mask the DESTINATION is tested with. The
+         // destination level's own rule is irrelevant to this cast.
+         if (from.teleport == .forbidden) return null;
+
+-        const from_pm = try (try self.navFor(from)).passMap(opts.mask);
+-        const to_pm = try (try self.navFor(to)).passMap(from.teleport.destinationMask(opts.mask));
++        const from_pm = try (try self.navFor(from)).passMapFor(opts.mask, opts.footprint);
++        const to_pm = try (try self.navFor(to)).passMapFor(from.teleport.destinationMask(opts.mask), opts.footprint);
+
+         var best: ?LevelCast = null;
+         var best_cost: i32 = std.math.maxInt(i32);
+@@ -410,7 +417,7 @@ pub const Router = struct {
+     /// on the far side of a wall is no use), then the closest. Warps still win over seams — a
+     /// staircase is a specific doorway, a seam is a wide border.
+     fn chooseExit(self: *Router, lv: *Level, dest: i32, from: Point, opts: Options) !?Crossing {
+-        const pm = try (try self.navFor(lv)).passMap(opts.mask);
++        const pm = try (try self.navFor(lv)).passMapFor(opts.mask, opts.footprint);
+         const comp = try pm.components(self.alloc);
+         const from_comp: u32 = if (pm.passable(from.x, from.y)) comp[pm.index(from.x, from.y)] else 0;
+
+@@ -459,7 +466,7 @@ pub const Router = struct {
+         opts: Options,
+     ) Error!Point {
+         const nlv = self.level(next) orelse return error.UnknownLevel;
+-        const pm = try (try self.navFor(nlv)).passMap(opts.mask);
++        const pm = try (try self.navFor(nlv)).passMapFor(opts.mask, opts.footprint);
+
+         const translated = nlv.fromWorld(from_lv.toWorld(leaving_at));
+         if (via != null and via.?.kind == .seam and nlv.inBounds(translated.x, translated.y)) {
+@@ -494,6 +501,8 @@ pub const Router = struct {
+                 .max_cast = opts.teleport_max_cast,
+                 .metric = opts.teleport_metric,
+                 .landing_mask = opts.mask,
++                .footprint = opts.footprint,
++                .gated_trace = opts.teleport_gated_trace,
+                 .snap_radius = snap_from,
+                 .goal_snap_radius = snap_to,
+             }, &hops) catch |err| switch (err) {
+@@ -640,8 +649,8 @@ pub const Router = struct {
+         snap_to: i32,
+         out: *std.ArrayListUnmanaged(Move),
+     ) Error!void {
+-        const pm = try (try self.navFor(lv)).passMap(opts.mask);
+-        if (lv.pads.len != 0) {
++        const pm = try (try self.navFor(lv)).passMapFor(opts.mask, opts.footprint);
++        if (opts.allow_pads and lv.pads.len != 0) {
+             const mark = out.items.len;
+             if (self.padRoute(lv, pm, from, to, opts, snap_from, snap_to, out)) |used| {
+                 if (used) return;
+diff --git a/packages/pathfinding/src/teleport.zig b/packages/pathfinding/src/teleport.zig
+index d80873e..78d4ca0 100644
+--- a/packages/pathfinding/src/teleport.zig
++++ b/packages/pathfinding/src/teleport.zig
+@@ -113,9 +113,13 @@ pub const Options = struct {
+     max_cast: ?i32 = ENGINE_MAX_CAST,
+     /// Which shape `max_cast` describes. Defaults to the engine's per-axis test.
+     metric: Metric = .chebyshev,
+-    /// Landing-cell collision mask. `SUNIT_RelocateUnit` snaps with COLMASK_PLAYER_PATH; a
+-    /// `.gated` level ORs in `COLMASK_PLAYER_FLYING` (0x804) on top (see `TeleportRule`).
++    /// Landing-cell collision mask. Legacy callers add the gated mask here;
++    /// gated_trace instead checks 0x804 on the adjusted source-to-target segment.
+     landing_mask: u16 = collision.Colmask.player_path,
++    footprint: grid.Footprint = .point,
++    /// D2R's gated rule traces source to target after size-two endpoint adjustment.
++    /// It is independent of the landing footprint and disabled for legacy callers.
++    gated_trace: bool = false,
+     /// Accept a passable cell this far from a blocked start, as the engine's
+     /// `GetFreeCoordinates_WithNeighboorRooms` snap does.
+     snap_radius: i32 = 8,
+@@ -164,9 +168,9 @@ pub fn find(
+ ) Error!void {
+     const level = nv.lv;
+     if (level.teleport == .forbidden) return error.Forbidden;
+-    const mask = level.teleport.destinationMask(opts.landing_mask);
++    const mask = if (opts.gated_trace) opts.landing_mask else level.teleport.destinationMask(opts.landing_mask);
+
+-    const pm = try nv.passMap(mask);
++    const pm = try nv.passMapFor(mask, opts.footprint);
+     const start = grid.nearestPassable(pm, sx, sy, opts.snap_radius) orelse return error.StartBlocked;
+     const goal = grid.nearestPassable(pm, gx, gy, opts.goal_snap_radius orelse opts.snap_radius) orelse
+         return error.GoalBlocked;
+@@ -178,7 +182,7 @@ pub fn find(
+     if (start.x == goal.x and start.y == goal.y) return;
+
+     // One cast is enough whenever the goal clears both gates.
+-    if (canHop(level, start, goal, start_room, goal_room, opts.max_cast, opts.metric)) {
++    if (canHop(level, start, goal, start_room, goal_room, opts.max_cast, opts.metric, opts.gated_trace)) {
+         try out.append(alloc, goal);
+         return;
+     }
+@@ -189,16 +193,21 @@ pub fn find(
+         if (max_cast <= 0) return error.Unreachable;
+         return findBounded(alloc, nv, pm, start, goal, start_room, goal_room, max_cast, opts, out);
+     }
++    // The unbounded room-only search has no edge trace. Do not bypass the gate.
++    if (opts.gated_trace and level.teleport == .gated) return error.Unreachable;
+     return findByRoom(alloc, level, pm, goal, start_room, goal_room, out);
+ }
+
+ /// Is a single cast from `from` to `to` legal? Both gates: the packet handler's per-axis distance
+ /// limit, and the room topology `SUNIT_RelocateUnit` enforces.
+-fn canHop(level: *const Level, from: Point, to: Point, from_room: u16, to_room: u16, max_cast: ?i32, metric: Metric) bool {
++fn canHop(level: *const Level, from: Point, to: Point, from_room: u16, to_room: u16, max_cast: ?i32, metric: Metric, gated_trace: bool) bool {
+     if (max_cast) |m| {
+         if (!metric.within(from.x, from.y, to.x, to.y, m)) return false;
+     }
+-    return level.rooms.canTeleportBetween(from_room, to_room);
++    if (!level.rooms.canTeleportBetween(from_room, to_room)) return false;
++    if (gated_trace and level.teleport == .gated)
++        return @import("cast.zig").unitsCanReach(level, collision.Colmask.player_flying, from, 2, to, 2);
++    return true;
+ }
+
+ /// A* over tiles, one unit of cost per cast.
+@@ -217,7 +226,7 @@ fn findBounded(
+     // Both ends have to be in the same walk-or-teleport region for any chain to exist. Teleport
+     // crosses walls, so it is the ROOM graph that has to connect, not the collision components.
+     const level = nv.lv;
+-    const reps = try nv.tileReps(pm.mask);
++    const reps = try nv.tileRepsFor(pm.mask, pm.footprint);
+     const tw = level.tileW();
+     const th = level.tileH();
+     const node_count: usize = @intCast(@max(tw * th, 0));
+@@ -275,7 +284,7 @@ fn findBounded(
+         const ti: usize = @intCast(ty * tw + tx);
+         const land = repPoint(pm, reps, ti) orelse continue;
+         const land_room = level.rooms.atSubtile(land.x, land.y) orelse continue;
+-        if (!canHop(level, start, land, start_room, land_room, max_cast, opts.metric)) continue;
++        if (!canHop(level, start, land, start_room, land_room, max_cast, opts.metric, opts.gated_trace)) continue;
+         if (g[ti] <= 1) continue;
+         g[ti] = 1;
+         came[ti] = -1; // parent is the start cell
+@@ -292,7 +301,7 @@ fn findBounded(
+
+         const cur_pt = repPoint(pm, reps, cur).?;
+         const cur_room = level.rooms.atSubtile(cur_pt.x, cur_pt.y).?;
+-        if (canHop(level, cur_pt, goal, cur_room, goal_room, max_cast, opts.metric)) {
++        if (canHop(level, cur_pt, goal, cur_room, goal_room, max_cast, opts.metric, opts.gated_trace)) {
+             try emit(alloc, pm, reps, came, cur, out);
+             try out.append(alloc, goal);
+             return;
+@@ -311,7 +320,7 @@ fn findBounded(
+             if (g[ni] <= cur_g + 1) continue;
+             const land = repPoint(pm, reps, ni) orelse continue;
+             const land_room = level.rooms.atSubtile(land.x, land.y) orelse continue;
+-            if (!canHop(level, cur_pt, land, cur_room, land_room, max_cast, opts.metric)) continue;
++            if (!canHop(level, cur_pt, land, cur_room, land_room, max_cast, opts.metric, opts.gated_trace)) continue;
+             g[ni] = cur_g + 1;
+             came[ni] = @intCast(cur);
+             try push(alloc, &heap, cur_g + 1 + castsTo(land, goal, max_cast, metric), @intCast(ni));
+@@ -324,6 +333,8 @@ fn repPoint(pm: *const grid.PassMap, reps: []const i32, tile: usize) ?Point {
+     const cell = reps[tile];
+     if (cell < 0) return null;
+     const c: usize = @intCast(cell);
++    // Representatives cache terrain only. Recheck occupancy on every query.
++    if (!pm.passableAt(c)) return null;
+     return .{
+         .x = @intCast(c % @as(usize, @intCast(pm.w))),
+         .y = @intCast(c / @as(usize, @intCast(pm.w))),
+diff --git a/packages/world/src/world.zig b/packages/world/src/world.zig
+index 9983c50..6af6634 100644
+--- a/packages/world/src/world.zig
++++ b/packages/world/src/world.zig
+@@ -46,11 +46,35 @@ pub const World = struct {
+     door_fn: []i16 = &.{},
+     /// Objects.txt ids whose `OperateFn` is 27 — the teleport pads. Indexed by class id.
+     pad_class: []bool = &.{},
++    navigation_tables_loaded: bool = false,
++    strict_navigation_tables: bool = false,
+
+     pub fn init(alloc: std.mem.Allocator, seed: u32, difficulty: drlg.Difficulty) World {
+         return .{ .alloc = alloc, .seed = seed, .difficulty = difficulty };
+     }
+
++    /// Use the SAME TableSet passed to Ctx.initFromBuffers. Metadata is copied;
++    /// generation retains the context's borrowed buffers as before.
++    pub fn initFromBuffers(alloc: std.mem.Allocator, seed: u32, difficulty: drlg.Difficulty, input: drlg.TableSet) !World {
++        var self = init(alloc, seed, difficulty);
++        try self.loadNavigationTables(input, true);
++        return self;
++    }
++
++    fn loadNavigationTables(self: *World, input: drlg.TableSet, strict: bool) !void {
++        const rules = try parseTeleportColumn(self.alloc, input.levels orelse d2data.file("Levels"), strict);
++        errdefer self.alloc.free(rules);
++        const doors = try parseDoorClasses(self.alloc, input.objects orelse d2data.file("Objects"), strict);
++        errdefer self.alloc.free(doors);
++        const pads = try parsePadClasses(self.alloc, input.objects orelse d2data.file("Objects"), strict);
++        // Publish together, only once; later acts use the same immutable dataset.
++        self.teleport_rule = rules;
++        self.door_fn = doors;
++        self.pad_class = pads;
++        self.strict_navigation_tables = strict;
++        self.navigation_tables_loaded = true;
++    }
++
+     pub fn deinit(self: *World) void {
+         for (self.levels.items) |l| {
+             l.deinit();
+@@ -70,9 +94,7 @@ pub const World = struct {
+     }
+
+     pub fn loadAct(self: *World, ctx: *drlg.Ctx, act_no: i32) !void {
+-        if (self.teleport_rule.len == 0) self.teleport_rule = try parseTeleportColumn(self.alloc);
+-        if (self.door_fn.len == 0) self.door_fn = try parseDoorClasses(self.alloc);
+-        if (self.pad_class.len == 0) self.pad_class = try parsePadClasses(self.alloc);
++        if (!self.navigation_tables_loaded) try self.loadNavigationTables(.{}, false);
+
+         var full = try drlg.generateActFull(ctx, self.alloc, act_no, self.seed, self.difficulty, .{
+             .room_links = true,
+@@ -166,7 +188,8 @@ pub const World = struct {
+     }
+
+     fn teleportRuleFor(self: *const World, id: i32) level_mod.TeleportRule {
+-        if (id < 0 or @as(usize, @intCast(id)) >= self.teleport_rule.len) return .allowed;
++        if (id < 0 or @as(usize, @intCast(id)) >= self.teleport_rule.len)
++            return if (self.strict_navigation_tables) .forbidden else .allowed;
+         return self.teleport_rule[@intCast(id)];
+     }
+
+@@ -294,11 +317,9 @@ pub const World = struct {
+         }
+         return out.toOwnedSlice(self.alloc);
+     }
+-
+ };
+
+-fn parseTeleportColumn(alloc: std.mem.Allocator) ![]level_mod.TeleportRule {
+-    const text = d2data.file("Levels");
++fn parseTeleportColumn(alloc: std.mem.Allocator, text: []const u8, strict: bool) ![]level_mod.TeleportRule {
+     var lines = std.mem.splitScalar(u8, text, '\n');
+     const header = lines.next() orelse return error.InvalidTable;
+
+@@ -318,6 +339,8 @@ fn parseTeleportColumn(alloc: std.mem.Allocator) ![]level_mod.TeleportRule {
+
+     var rows: std.ArrayListUnmanaged(level_mod.TeleportRule) = .empty;
+     errdefer rows.deinit(alloc);
++    var seen: std.AutoHashMapUnmanaged(i32, void) = .empty;
++    defer seen.deinit(alloc);
+     while (lines.next()) |line| {
+         if (std.mem.trim(u8, line, "\r \t").len == 0) continue;
+         var cols = std.mem.splitScalar(u8, line, '\t');
+@@ -326,13 +349,26 @@ fn parseTeleportColumn(alloc: std.mem.Allocator) ![]level_mod.TeleportRule {
+         var tele: u8 = 1;
+         while (cols.next()) |c| : (i += 1) {
+             const v = std.mem.trim(u8, c, "\r ");
+-            if (i == idc) id = std.fmt.parseInt(i32, v, 10) catch null;
+-            if (i == tc) tele = std.fmt.parseInt(u8, v, 10) catch 1;
++            if (i == idc and v.len != 0) id = std.fmt.parseInt(i32, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
++            if (i == tc) tele = if (strict and v.len == 0) 0 else std.fmt.parseInt(u8, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
+         }
+         const lid = id orelse continue;
+-        if (lid < 0) continue;
++        if (strict and i <= tc) return error.InvalidNavigationTable;
++        if (lid < 0) {
++            if (strict) return error.InvalidNavigationTable;
++            continue;
++        }
++        if (strict and try seen.fetchPut(alloc, lid, {}) != null) return error.DuplicateNavigationId;
++        // Resource ceiling for dense metadata, not an engine LevelId limit.
++        if (lid > 1_000_000) return error.NavigationTableTooSparse;
+         const want: usize = @intCast(lid + 1);
+-        if (rows.items.len < want) try rows.appendNTimes(alloc, .allowed, want - rows.items.len);
++        if (rows.items.len < want) try rows.appendNTimes(alloc, if (strict) .forbidden else .allowed, want - rows.items.len);
+         rows.items[@intCast(lid)] = switch (tele) {
+             0 => .forbidden,
+             2 => .gated,
+@@ -348,11 +384,9 @@ fn parseTeleportColumn(alloc: std.mem.Allocator) ![]level_mod.TeleportRule {
+ /// but secret doors (18), the Act 3 slime doors (29) and Tyrael's door (0) are doors too, and a
+ /// route should mention them. "TrappDoor" is excluded by the exact-name match — it is a level
+ /// transition, not something you open.
+-/// Objects.txt ids with `OperateFn` 27, indexed by class id. Exactly four rows have it and all
+-/// four are teleport pads (192, 304, 305, 306), so the column IS the selector — no name matching
+-/// needed and no false positives to filter.
+-fn parsePadClasses(alloc: std.mem.Allocator) ![]bool {
+-    const text = d2data.file("Objects");
++/// Objects.txt ids with `OperateFn` 27, indexed by the generator's class-id contract.
++/// Embedded data selects four pads; active tables may add or replace these rows.
++fn parsePadClasses(alloc: std.mem.Allocator, text: []const u8, strict: bool) ![]bool {
+     var lines = std.mem.splitScalar(u8, text, '\n');
+     const header = lines.next() orelse return error.InvalidTable;
+
+@@ -364,6 +398,7 @@ fn parsePadClasses(alloc: std.mem.Allocator) ![]bool {
+         while (cols.next()) |c| : (i += 1) {
+             const name = std.mem.trim(u8, c, "\r");
+             if (std.mem.eql(u8, name, "Id")) id_col = i;
++            if (id_col == null and std.mem.eql(u8, name, "*ID")) id_col = i;
+             if (std.mem.eql(u8, name, "OperateFn")) fn_col = i;
+         }
+     }
+@@ -380,39 +415,53 @@ fn parsePadClasses(alloc: std.mem.Allocator) ![]bool {
+         var ofn: i16 = -1;
+         while (cols.next()) |c| : (i += 1) {
+             const v = std.mem.trim(u8, c, "\r ");
+-            if (i == idc) id = std.fmt.parseInt(i32, v, 10) catch null;
+-            if (i == fc) ofn = std.fmt.parseInt(i16, v, 10) catch -1;
++            if (i == idc and v.len != 0) id = std.fmt.parseInt(i32, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
++            if (i == fc) ofn = if (strict and v.len == 0) 0 else std.fmt.parseInt(i16, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
+         }
+         const cid = id orelse continue;
+-        if (cid < 0) continue;
++        if (strict and i <= fc) return error.InvalidNavigationTable;
++        if (cid < 0) {
++            if (strict) return error.InvalidNavigationTable;
++            continue;
++        }
++        if (cid > 1_000_000) return error.NavigationTableTooSparse;
+         const want: usize = @intCast(cid + 1);
+         if (out.items.len < want) try out.appendNTimes(alloc, false, want - out.items.len);
+-        if (ofn == 27) out.items[@intCast(cid)] = true;
++        // Match the generator: later Expansion entries replace legacy IDs.
++        out.items[@intCast(cid)] = ofn == 27;
+     }
+     return out.toOwnedSlice(alloc);
+ }
+
+-fn parseDoorClasses(alloc: std.mem.Allocator) ![]i16 {
+-    const text = d2data.file("Objects");
++fn parseDoorClasses(alloc: std.mem.Allocator, text: []const u8, strict: bool) ![]i16 {
+     var lines = std.mem.splitScalar(u8, text, '\n');
+     const header = lines.next() orelse return error.InvalidTable;
+
+     var id_col: ?usize = null;
+     var fn_col: ?usize = null;
+     var name_col: ?usize = null;
++    var is_door_col: ?usize = null;
+     {
+         var cols = std.mem.splitScalar(u8, header, '\t');
+         var i: usize = 0;
+         while (cols.next()) |c| : (i += 1) {
+             const name = std.mem.trim(u8, c, "\r");
+             if (std.mem.eql(u8, name, "Id")) id_col = i;
++            if (id_col == null and std.mem.eql(u8, name, "*ID")) id_col = i;
+             if (std.mem.eql(u8, name, "OperateFn")) fn_col = i;
+             if (name_col == null and std.mem.eql(u8, name, "Name")) name_col = i;
++            if (strict and std.mem.eql(u8, name, "IsDoor")) is_door_col = i;
+         }
+     }
+     const idc = id_col orelse return error.InvalidTable;
+     const fc = fn_col orelse return error.InvalidTable;
+-    const nc = name_col orelse return error.InvalidTable;
++    if (name_col == null and is_door_col == null) return error.InvalidTable;
+
+     var out: std.ArrayListUnmanaged(i16) = .empty;
+     errdefer out.deinit(alloc);
+@@ -425,15 +474,31 @@ fn parseDoorClasses(alloc: std.mem.Allocator) ![]i16 {
+         var ofn: i16 = 0;
+         while (cols.next()) |c| : (i += 1) {
+             const v = std.mem.trim(u8, c, "\r ");
+-            if (i == idc) id = std.fmt.parseInt(i32, v, 10) catch null;
+-            if (i == nc) is_door = std.ascii.eqlIgnoreCase(v, "door");
+-            if (i == fc) ofn = std.fmt.parseInt(i16, v, 10) catch 0;
++            if (i == idc and v.len != 0) id = std.fmt.parseInt(i32, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
++            if (is_door_col) |dc| {
++                if (i == dc) {
++                    const flag: i32 = if (v.len == 0) 0 else std.fmt.parseInt(i32, v, 10) catch return error.InvalidNavigationTable;
++                    is_door = flag != 0;
++                }
++            } else if (i == name_col.?) is_door = std.ascii.eqlIgnoreCase(v, "door");
++            if (i == fc) ofn = if (strict and v.len == 0) 0 else std.fmt.parseInt(i16, v, 10) catch {
++                if (strict) return error.InvalidNavigationTable;
++                continue;
++            };
+         }
+         const cid = id orelse continue;
+-        if (cid < 0) continue;
++        if (strict and i <= @max(fc, is_door_col orelse name_col.?)) return error.InvalidNavigationTable;
++        if (cid < 0) {
++            if (strict) return error.InvalidNavigationTable;
++            continue;
++        }
++        if (cid > 1_000_000) return error.NavigationTableTooSparse;
+         const want: usize = @intCast(cid + 1);
+         if (out.items.len < want) try out.appendNTimes(alloc, -1, want - out.items.len);
+-        if (is_door) out.items[@intCast(cid)] = ofn;
++        out.items[@intCast(cid)] = if (is_door) ofn else -1;
+     }
+     return out.toOwnedSlice(alloc);
+ }
+@@ -442,7 +507,7 @@ const testing = std.testing;
+
+ test "Levels.txt Teleport parses to the rule the engine applies" {
+     const alloc = testing.allocator;
+-    const rules = try parseTeleportColumn(alloc);
++    const rules = try parseTeleportColumn(alloc, d2data.file("Levels"), false);
+     defer alloc.free(rules);
+
+     // Only the Null level refuses teleport outright, and only Duriel's Lair gates the

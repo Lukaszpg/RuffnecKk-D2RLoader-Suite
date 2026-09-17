@@ -1,3 +1,6 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include "cast_triggers_policy.hpp"
 
 #include <cassert>

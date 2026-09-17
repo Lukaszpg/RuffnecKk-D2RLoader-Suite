@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "No Gold Loss on Death",
+  "description": "Prevents death from dropping, deducting, or destroying player gold.",
+  "patches": [
+    {
+      "description": "Skip the player gold death penalty",
+      "op": "nop",
+      "rva": "0x424AD1",
+      "size": 5,
+      "expected": "E8 DA 11 00 00"
+    }
+  ]
+}

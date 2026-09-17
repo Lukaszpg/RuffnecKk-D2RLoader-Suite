@@ -3,12 +3,18 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
 #include <vector>
+#include "gps_route_walk_grid.hpp"
 
 namespace RuffnecKk::MapSense {
 
 inline constexpr std::int32_t UnknownNavigationLevelId = -1;
 inline constexpr std::size_t MaximumNavigationDestinations = 256U;
+inline constexpr std::size_t MaximumNavigationGpsRoutePaths = 64U;
+inline constexpr std::size_t MaximumNavigationGpsRoutePoints = 65'536U;
+inline constexpr std::int32_t MaximumNavigationGpsGoalSnapDistance = 48;
 inline constexpr std::size_t NativeUnitClassIdOffset = 0x04U;
 inline constexpr std::uintptr_t NativeUnitIdentityLayoutWitnessRva = 0x34B7B2U;
 inline constexpr std::array<std::uint8_t, 20>
@@ -33,6 +39,55 @@ enum class NavigationLineKind : std::uint8_t {
     CustomLevel,
     Quest,
 };
+
+inline constexpr std::size_t NavigationLineKindCount = 4U;
+
+enum class NavigationLineMode : std::uint8_t {
+    Direct,
+    GpsWalk,
+    GpsTeleport,
+};
+
+struct NavigationLinePolicy final {
+    bool enabled{};
+    NavigationLineMode mode{NavigationLineMode::Direct};
+
+    constexpr auto operator==(const NavigationLinePolicy&) const noexcept
+        -> bool = default;
+};
+
+struct NavigationLinePolicySnapshot final {
+    std::uint64_t revision{1U};
+    std::array<NavigationLinePolicy, NavigationLineKindCount> families{};
+};
+
+[[nodiscard]] constexpr auto NavigationLineKindIndex(
+        NavigationLineKind kind) noexcept -> std::size_t {
+    switch (kind) {
+        case NavigationLineKind::Waypoint: return 0U;
+        case NavigationLineKind::Progression: return 1U;
+        case NavigationLineKind::CustomLevel: return 2U;
+        case NavigationLineKind::Quest: return 3U;
+    }
+    return NavigationLineKindCount;
+}
+
+[[nodiscard]] constexpr auto NavigationLineKindMask(
+        NavigationLineKind kind) noexcept -> std::uint8_t {
+    switch (kind) {
+        case NavigationLineKind::Waypoint: return 1U;
+        case NavigationLineKind::Progression: return 2U;
+        case NavigationLineKind::Quest: return 4U;
+        case NavigationLineKind::CustomLevel: return 8U;
+    }
+    return 0U;
+}
+
+[[nodiscard]] constexpr auto IsNavigationLineKindEnabled(
+        std::uint8_t enabledMask,
+        NavigationLineKind kind) noexcept -> bool {
+    return (enabledMask & NavigationLineKindMask(kind)) != 0U;
+}
 
 enum class NavigationDestinationSelection : std::uint8_t {
     All,
@@ -78,6 +133,9 @@ struct NavigationSubtileDestination final {
     bool useExactClientCoordinates{};
     NavigationDestinationSelection selection{
         NavigationDestinationSelection::All};
+
+    constexpr auto operator==(
+        const NavigationSubtileDestination&) const noexcept -> bool = default;
 };
 
 struct NavigationNativePoint final {
@@ -141,6 +199,10 @@ struct NavigationAutomapPass final {
     bool inTown{};
     std::int32_t playerClientX{};
     std::int32_t playerClientY{};
+    // Authoritative dynamic-path integer position; never inferred from drawing
+    // coordinates. A missing witness disables GPS without disabling Direct.
+    bool hasPlayerSubtile{};
+    NavigationNativePoint playerSubtile{};
     std::int32_t nativeWidth{};
     std::int32_t nativeHeight{};
     std::int32_t clipLeft{};
@@ -181,6 +243,7 @@ struct NavigationLineSnapshot final {
     std::uint64_t destinationId{};
     std::uint64_t sessionGeneration{};
     std::uint64_t destinationRevision{};
+    std::uint64_t policyRevision{};
     std::int32_t levelId{UnknownNavigationLevelId};
     std::int32_t startX{};
     std::int32_t startY{};
@@ -191,6 +254,120 @@ struct NavigationLineSnapshot final {
     NavigationLineKind kind{NavigationLineKind::Waypoint};
 };
 
+// GPS route diagnostics are values only. The helper never receives a D2R
+// pointer and the render thread never projects a world coordinate itself.
+enum class NavigationGpsRouteMode : std::uint8_t {
+    Walk,
+    Teleport,
+};
+
+struct NavigationGpsRoutePoint final {
+    std::int32_t subtileX{};
+    std::int32_t subtileY{};
+};
+
+struct NavigationGpsRoutePath final {
+    std::uint64_t destinationId{};
+    std::uint64_t policyRevision{};
+    NavigationLineKind kind{NavigationLineKind::Waypoint};
+    NavigationGpsRouteMode mode{NavigationGpsRouteMode::Walk};
+    std::vector<NavigationGpsRoutePoint> points;
+    std::shared_ptr<const GpsRouteWalkGrid> walkGrid;
+};
+
+struct NavigationGpsRouteSegmentSnapshot final {
+    std::uint64_t destinationId{};
+    std::uint64_t sessionGeneration{};
+    std::uint64_t destinationRevision{};
+    std::uint64_t policyRevision{};
+    std::int32_t levelId{UnknownNavigationLevelId};
+    std::int32_t startX{};
+    std::int32_t startY{};
+    std::int32_t endX{};
+    std::int32_t endY{};
+    std::int32_t nativeWidth{};
+    std::int32_t nativeHeight{};
+    NavigationLineKind kind{NavigationLineKind::Waypoint};
+    NavigationGpsRouteMode mode{NavigationGpsRouteMode::Walk};
+};
+
+// Captured synchronously from the native automap pass. It contains current
+// player and resolver values only, so it may safely cross to the helper worker.
+struct NavigationGpsRouteSourceSnapshot final {
+    std::uint64_t sessionGeneration{};
+    std::uint64_t destinationRevision{};
+    NavigationLinePolicySnapshot policy{};
+    std::int32_t levelId{UnknownNavigationLevelId};
+    NavigationGpsRoutePoint player{};
+    std::vector<NavigationSubtileDestination> destinations;
+};
+
+// Diagnostic only: does not control destination-refresh scheduling. This is
+// the most recently sampled observer outcome, not a per-session counter.
+enum class NavigationAutomapObservationReason : std::uint8_t {
+    Unobserved, Inactive, Contended, NoSession, UnknownLevel, LevelChanged,
+    Town, NoDestinations, NoNativeOrigin, InvalidProjectionContext,
+    InvalidNativeDimensions, InvalidClip, PlayerProjectionFailed, Projected,
+};
+
+[[nodiscard]] auto GetNavigationAutomapObservationReason() noexcept
+    -> NavigationAutomapObservationReason;
+
+[[nodiscard]] constexpr auto NavigationAutomapObservationReasonName(
+        NavigationAutomapObservationReason reason) noexcept -> const char* {
+    switch (reason) {
+        case NavigationAutomapObservationReason::Unobserved: return "unobserved";
+        case NavigationAutomapObservationReason::Inactive: return "inactive";
+        case NavigationAutomapObservationReason::Contended: return "contended";
+        case NavigationAutomapObservationReason::NoSession: return "no-session";
+        case NavigationAutomapObservationReason::UnknownLevel: return "unknown-level";
+        case NavigationAutomapObservationReason::LevelChanged: return "level-changed";
+        case NavigationAutomapObservationReason::Town: return "town";
+        case NavigationAutomapObservationReason::NoDestinations: return "no-destinations";
+        case NavigationAutomapObservationReason::NoNativeOrigin: return "no-native-origin";
+        case NavigationAutomapObservationReason::InvalidProjectionContext: return "invalid-projection-context";
+        case NavigationAutomapObservationReason::InvalidNativeDimensions: return "invalid-native-dimensions";
+        case NavigationAutomapObservationReason::InvalidClip: return "invalid-clip";
+        case NavigationAutomapObservationReason::PlayerProjectionFailed: return "player-projection-failed";
+        case NavigationAutomapObservationReason::Projected: return "projected";
+    }
+    return "unknown";
+}
+
+enum class NavigationGpsSourceReadiness : std::uint8_t {
+    Ready,
+    Inactive,
+    Contended,
+    UnknownLevel,
+    NoDestinations,
+    NoPlayer,
+    Exception,
+};
+
+struct NavigationGpsSourceDiagnostics final {
+    NavigationGpsSourceReadiness readiness{
+        NavigationGpsSourceReadiness::Inactive};
+    bool stateAvailable{};
+    std::uint64_t sessionGeneration{};
+    std::uint64_t destinationRevision{};
+    std::int32_t levelId{UnknownNavigationLevelId};
+    std::size_t destinationCount{};
+    bool hasPlayer{};
+};
+
+struct NavigationGpsRouteDestination final {
+    NavigationSubtileDestination destination{};
+    NavigationGpsRouteMode mode{NavigationGpsRouteMode::Walk};
+};
+
+// Filters GPS-selected families before NearestToPlayer reduction and the
+// caller's bounded output cap. The result is ordered by destination identity.
+[[nodiscard]] auto SelectNavigationGpsRouteDestinations(
+    std::span<const NavigationSubtileDestination> source,
+    NavigationGpsRoutePoint player,
+    const NavigationLinePolicySnapshot& policy,
+    std::span<NavigationGpsRouteDestination> output) noexcept -> std::size_t;
+
 void InitializeNavigationEngine() noexcept;
 void ShutdownNavigationEngine() noexcept;
 
@@ -200,6 +377,15 @@ void ResetNavigationSession(std::uint64_t sessionGeneration) noexcept;
 void ResetNavigationLevel(
     std::uint64_t sessionGeneration,
     std::int32_t levelId) noexcept;
+
+// Publishes the four-family visibility/mode policy without waiting on the
+// native projection lock. Only enabled/mode changes advance the revision;
+// colors remain a renderer concern. A changed policy revokes both projections.
+[[nodiscard]] auto PublishNavigationLinePolicy(
+    std::array<NavigationLinePolicy, NavigationLineKindCount> families) noexcept
+    -> bool;
+[[nodiscard]] auto AcquireNavigationLinePolicySnapshot() noexcept
+    -> NavigationLinePolicySnapshot;
 
 // Binds an initially unknown level without clearing already published
 // same-level destinations. It never changes a different known level.
@@ -226,6 +412,34 @@ void ResetNavigationLevel(
 [[nodiscard]] auto AcquireNavigationLineSnapshots(
     std::vector<NavigationLineSnapshot>& snapshots,
     bool retainCurrentProjection = false) noexcept -> std::size_t;
+
+[[nodiscard]] auto AcquireNavigationGpsRouteSourceSnapshot(
+    NavigationGpsRouteSourceSnapshot& snapshot,
+    NavigationGpsSourceDiagnostics* diagnostics = nullptr) noexcept -> bool;
+
+// Atomically replaces all GPS paths for one exact resolver publication. Each
+// path must begin at the coordinator's authenticated request origin and end
+// within the bounded standable approach to its current destination. Ordinary
+// movement after submission is soft state; stale hard identity, cross-level,
+// and oversized publications fail closed.
+[[nodiscard]] auto PublishNavigationGpsRoutes(
+    std::uint64_t sessionGeneration,
+    std::uint64_t destinationRevision,
+    std::uint64_t policyRevision,
+    std::int32_t levelId,
+    const NavigationGpsRoutePath* paths,
+    std::size_t pathCount,
+    std::uint64_t* acceptedContentEpoch = nullptr) noexcept -> bool;
+
+[[nodiscard]] auto GetNavigationGpsRouteContentEpoch() noexcept -> std::uint64_t;
+
+[[nodiscard]] auto AcquireNavigationGpsRouteSegmentSnapshots(
+    std::vector<NavigationGpsRouteSegmentSnapshot>& snapshots,
+    bool retainCurrentProjection = false) noexcept -> std::size_t;
+
+[[nodiscard]] auto WantsNavigationGpsRouteFrame(
+    bool retainCurrentProjection = false) noexcept -> bool;
+void InvalidateNavigationGpsRoutes() noexcept;
 
 // Drops only the renderer-facing projection. Resolver destinations, level and
 // session state remain intact so the next native automap pass can republish

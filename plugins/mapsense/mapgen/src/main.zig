@@ -1,6 +1,8 @@
 const std = @import("std");
 const drlg = @import("d2-drlg");
+const pf = @import("d2-pathfinding");
 const render = @import("d2-render");
+const gps = @import("gps_routing.zig");
 
 fn performanceCounter() u64 {
     var value: std.os.windows.LARGE_INTEGER = undefined;
@@ -22,14 +24,170 @@ fn parseU32(text: []const u8) !u32 {
     return std.fmt.parseUnsigned(u32, text, 10);
 }
 
-const MaximumDataRoots: usize = 4;
+fn parseI32(text: []const u8) !i32 {
+    return std.fmt.parseInt(i32, text, 10);
+}
+
+fn appendRouteInteger(
+    comptime T: type,
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    value: T,
+) !void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    try output.appendSlice(allocator, &bytes);
+}
+
+fn writeRouteBinary(
+    allocator: std.mem.Allocator,
+    inputs: *const LoadedInputs,
+    data_options: DataOptions,
+    seed: u32,
+    difficulty_value: u32,
+    level_id: i32,
+    from_world: pf.Point,
+    to_world: pf.Point,
+    mode: gps.Mode,
+    output_path: []const u8,
+    follow: bool,
+) !void {
+    if (difficulty_value > 2 or level_id <= 0 or
+        from_world.x < 0 or from_world.y < 0 or
+        to_world.x < 0 or to_world.y < 0)
+    {
+        return error.InvalidRouteRequest;
+    }
+
+    var environment = try gps.Environment.create(
+        allocator,
+        seed,
+        @enumFromInt(difficulty_value),
+        inputs.tables(data_options),
+    );
+    defer environment.destroy();
+
+    var level: ?*pf.Level = null;
+    for (0..5) |act| {
+        try environment.loadAct(@intCast(act));
+        level = environment.world.level(level_id);
+        if (level != null) break;
+    }
+    const selected = level orelse return error.LevelNotGenerated;
+    const from = selected.fromWorld(from_world);
+    const to = selected.fromWorld(to_world);
+    if (!selected.inBounds(from.x, from.y) or !selected.inBounds(to.x, to.y)) {
+        return error.RouteEndpointOutsideLevel;
+    }
+
+    var route = try gps.route(
+        &environment.router,
+        .{ .level = level_id, .x = from.x, .y = from.y },
+        .{ .level = level_id, .x = to.x, .y = to.y },
+        mode,
+    );
+    defer route.deinit();
+    if (route.legs.len != 1 or route.legs[0].level != level_id or
+        route.legs[0].exit != null or route.legs[0].moves.len < 2)
+    {
+        return error.InvalidCurrentLevelRoute;
+    }
+
+    const moves = route.legs[0].moves;
+    if (moves.len > 65_536) return error.RouteTooLarge;
+    const route_size = std.math.add(
+        usize,
+        52,
+        std.math.mul(usize, moves.len, 12) catch return error.RouteTooLarge,
+    ) catch return error.RouteTooLarge;
+    const follow_grid = if (follow)
+        try gps.followGrid(&environment.router, selected, mode)
+    else
+        null;
+    const follow_size = if (follow)
+        std.math.add(
+            usize,
+            20,
+            if (follow_grid) |grid| grid.layout.byte_count else 0,
+        ) catch return error.RouteTooLarge
+    else
+        0;
+    const total_size = std.math.add(
+        usize,
+        route_size,
+        follow_size,
+    ) catch return error.RouteTooLarge;
+    if (total_size > 1 * 1024 * 1024) return error.RouteTooLarge;
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(allocator);
+    try output.ensureTotalCapacity(allocator, total_size);
+    try output.appendSlice(allocator, if (follow) "MSR2" else "MSR1");
+    try appendRouteInteger(u16, &output, allocator, if (follow) 2 else 1);
+    try output.append(allocator, @intFromEnum(mode));
+    try output.append(allocator, 0);
+    try appendRouteInteger(u32, &output, allocator, seed);
+    try output.append(allocator, @intCast(difficulty_value));
+    try output.appendSlice(allocator, &[_]u8{ 0, 0, 0 });
+    try appendRouteInteger(i32, &output, allocator, level_id);
+    try appendRouteInteger(i32, &output, allocator, from_world.x);
+    try appendRouteInteger(i32, &output, allocator, from_world.y);
+    try appendRouteInteger(i32, &output, allocator, to_world.x);
+    try appendRouteInteger(i32, &output, allocator, to_world.y);
+    try appendRouteInteger(u64, &output, allocator, inputs.fingerprint);
+    try appendRouteInteger(u32, &output, allocator, @intCast(moves.len));
+    try appendRouteInteger(u32, &output, allocator, 0);
+    for (moves) |move| {
+        const world = selected.toWorld(.{ .x = move.x, .y = move.y });
+        try appendRouteInteger(i32, &output, allocator, world.x);
+        try appendRouteInteger(i32, &output, allocator, world.y);
+        try output.append(allocator, @intFromEnum(move.kind));
+        try output.appendSlice(allocator, &[_]u8{ 0, 0, 0 });
+    }
+    if (follow) try gps.appendFollowGridBinary(allocator, &output, follow_grid);
+    if (output.items.len != total_size) return error.RouteSizeMismatch;
+    const first = selected.toWorld(.{ .x = moves[0].x, .y = moves[0].y });
+    const last = selected.toWorld(.{
+        .x = moves[moves.len - 1].x,
+        .y = moves[moves.len - 1].y,
+    });
+    if (first.x != from_world.x or first.y != from_world.y or
+        @abs(last.x - to_world.x) > gps.goal_snap_radius or
+        @abs(last.y - to_world.y) > gps.goal_snap_radius)
+    {
+        return error.RouteEndpointChanged;
+    }
+
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().createFile(io, output_path, .{
+        .exclusive = true,
+    });
+    defer file.close(io);
+    try file.writeStreamingAll(io, output.items);
+    std.debug.print(
+        "{s} seed={d} difficulty={d} level={d} mode={s} moves={d} bytes={d} fingerprint={x}\n",
+        .{
+            if (follow) "MSR2" else "MSR1",
+            seed,
+            difficulty_value,
+            level_id,
+            @tagName(mode),
+            moves.len,
+            output.items.len,
+            inputs.fingerprint,
+        },
+    );
+}
+
+const MaximumDataRoots: usize = 8;
 const MaximumTableBytes: usize = 64 * 1024 * 1024;
 const MaximumDataPathBytes: usize = 32 * 1024;
 
-const DataOptions = struct {
-    excel_roots: [MaximumDataRoots][]const u8 = .{ "", "", "", "" },
+pub const DataOptions = struct {
+    excel_roots: [MaximumDataRoots][]const u8 = .{ "", "", "", "", "", "", "", "" },
     excel_root_count: usize = 0,
-    tiles_roots: [MaximumDataRoots][]const u8 = .{ "", "", "", "" },
+    tiles_roots: [MaximumDataRoots][]const u8 = .{ "", "", "", "", "", "", "", "" },
     tiles_root_count: usize = 0,
 
     fn isAbsolutePath(path: []const u8) bool {
@@ -55,7 +213,7 @@ const DataOptions = struct {
         count.* += 1;
     }
 
-    fn parse(args: anytype) !DataOptions {
+    pub fn parse(args: anytype) !DataOptions {
         var result: DataOptions = .{};
         while (args.next()) |flag| {
             const value = args.next() orelse return error.MissingDataRoot;
@@ -79,7 +237,7 @@ const DataOptions = struct {
     }
 };
 
-const LoadedInputs = struct {
+pub const LoadedInputs = struct {
     owned: [7]?[]u8 = .{ null, null, null, null, null, null, null },
     fingerprint: u64 = 14695981039346656037,
 
@@ -98,8 +256,6 @@ const LoadedInputs = struct {
         roots: []const []const u8,
         filename: []const u8,
     ) !?[]u8 {
-        var selected: ?[]u8 = null;
-        errdefer if (selected) |bytes| allocator.free(bytes);
         var threaded = std.Io.Threaded.init_single_threaded;
         const io = threaded.io();
         for (roots) |root| {
@@ -116,20 +272,12 @@ const LoadedInputs = struct {
                 allocator.free(bytes);
                 return error.ActiveTableEmpty;
             }
-            if (selected) |current| {
-                if (!std.mem.eql(u8, current, bytes)) {
-                    allocator.free(bytes);
-                    return error.ConflictingActiveTables;
-                }
-                allocator.free(bytes);
-            } else {
-                selected = bytes;
-            }
+            return bytes;
         }
-        return selected;
+        return null;
     }
 
-    fn load(
+    pub fn load(
         allocator: std.mem.Allocator,
         options: DataOptions,
     ) !LoadedInputs {
@@ -148,7 +296,7 @@ const LoadedInputs = struct {
         return result;
     }
 
-    fn deinit(self: *LoadedInputs, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *LoadedInputs, allocator: std.mem.Allocator) void {
         for (&self.owned) |*entry| {
             if (entry.*) |bytes| allocator.free(bytes);
             entry.* = null;
@@ -170,6 +318,21 @@ const LoadedInputs = struct {
             .objects = self.owned[6],
             .ds1_roots = options.tiles_roots[0..options.tiles_root_count],
         });
+    }
+
+    /// Offline GPS uses the same loaded bytes. Keep context() above unchanged
+    /// so the installed 1.0.2 r3 helper remains byte-identical.
+    pub fn tables(self: *const LoadedInputs, options: DataOptions) drlg.TableSet {
+        return .{
+            .levels = self.owned[0],
+            .lvl_prest = self.owned[1],
+            .lvl_types = self.owned[2],
+            .lvl_maze = self.owned[3],
+            .lvl_sub = self.owned[4],
+            .lvl_warp = self.owned[5],
+            .objects = self.owned[6],
+            .ds1_roots = options.tiles_roots[0..options.tiles_root_count],
+        };
     }
 };
 
@@ -1182,6 +1345,43 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer args.deinit();
     _ = args.next();
     const first = args.next();
+    if (first != null and (std.mem.eql(u8, first.?, "route-binary") or
+        std.mem.eql(u8, first.?, "route-follow-binary")))
+    {
+        const follow = std.mem.eql(u8, first.?, "route-follow-binary");
+        const seed = try parseU32(args.next() orelse return error.MissingSeed);
+        const difficulty_value = try parseU32(args.next() orelse return error.MissingDifficulty);
+        const level_id = try parseI32(args.next() orelse return error.MissingLevel);
+        const from_x = try parseI32(args.next() orelse return error.MissingFromX);
+        const from_y = try parseI32(args.next() orelse return error.MissingFromY);
+        const to_x = try parseI32(args.next() orelse return error.MissingToX);
+        const to_y = try parseI32(args.next() orelse return error.MissingToY);
+        const mode_text = args.next() orelse return error.MissingRouteMode;
+        const mode: gps.Mode = if (std.mem.eql(u8, mode_text, "walk"))
+            .walk
+        else if (std.mem.eql(u8, mode_text, "teleport"))
+            .teleport
+        else
+            return error.InvalidRouteMode;
+        const output_path = args.next() orelse return error.MissingOutputPath;
+        const data_options = try DataOptions.parse(&args);
+        var inputs = try LoadedInputs.load(allocator, data_options);
+        defer inputs.deinit(allocator);
+        try writeRouteBinary(
+            allocator,
+            &inputs,
+            data_options,
+            seed,
+            difficulty_value,
+            level_id,
+            .{ .x = from_x, .y = from_y },
+            .{ .x = to_x, .y = to_y },
+            mode,
+            output_path,
+            follow,
+        );
+        return;
+    }
     if (first != null and (std.mem.eql(u8, first.?, "geometry") or std.mem.eql(u8, first.?, "geometry-cells") or std.mem.eql(u8, first.?, "geometry-raw") or std.mem.eql(u8, first.?, "geometry-raw-cells"))) {
         const emit_cells = std.mem.eql(u8, first.?, "geometry-cells") or std.mem.eql(u8, first.?, "geometry-raw-cells");
         const campaign_only = std.mem.eql(u8, first.?, "geometry") or std.mem.eql(u8, first.?, "geometry-cells");

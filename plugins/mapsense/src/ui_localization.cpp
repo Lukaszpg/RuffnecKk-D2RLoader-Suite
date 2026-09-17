@@ -1,6 +1,7 @@
 #include "ui_localization.hpp"
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/localization.hpp>
 
 #include <array>
 #include <atomic>
@@ -100,6 +101,14 @@ constexpr std::array<Translation, UiTextCount> TextCatalog{{
     {{"Custom Level Lines", "自訂區域路線", "Linien zu eigenen Gebieten", "Líneas a zonas personalizadas", "Lignes vers les zones personnalisées", "Linee aree personalizzate", "사용자 지정 지역 경로", "Linie do niestandardowych obszarów", "カスタムエリア線", "Linhas para áreas personalizadas", "Линии к пользовательским областям", "自定义区域路线"}},
     {{"(to add more custom destinations, configure in TOML)", "（若要新增更多自訂目的地，請在 TOML 中設定）", "(weitere eigene Ziele in TOML konfigurieren)", "(para añadir más destinos personalizados, configúralos en TOML)", "(pour ajouter d’autres destinations personnalisées, configurez-les dans le TOML)", "(per aggiungere altre destinazioni personalizzate, configurale nel TOML)", "(사용자 지정 목적지를 더 추가하려면 TOML에서 설정하세요)", "(aby dodać więcej własnych celów, skonfiguruj je w TOML)", "（カスタム目的地を追加するにはTOMLで設定してください）", "(para adicionar mais destinos personalizados, configure-os no TOML)", "(чтобы добавить другие пользовательские цели, настройте их в TOML)", "（若要添加更多自定义目的地，请在 TOML 中设置）"}},
     {{"Line Color", "線條顏色", "Linienfarbe", "Color de línea", "Couleur de ligne", "Colore linea", "선 색상", "Kolor linii", "線の色", "Cor da linha", "Цвет линии", "线条颜色"}},
+    {{"Direct Line", "直接路線", "Direkte Linie", "Línea directa", "Ligne directe", "Linea diretta", "직접 선", "Linia bezpośrednia", "直接ライン", "Linha direta", "Прямая линия", "直线路线"}},
+    {{"Run/Walk GPS Line", "GPS 跑步/步行路線", "GPS-Linie zum Laufen/Gehen", "Línea GPS para correr/caminar", "Ligne GPS course/marche", "Linea GPS corsa/cammino", "달리기/걷기 GPS 선", "Linia GPS biegu/chodu", "走る/歩く GPS ライン", "Linha GPS para correr/caminhar", "GPS-линия бега/ходьбы", "跑步/步行 GPS 路线"}},
+    {{"Teleport GPS Line", "GPS 傳送路線", "GPS-Teleportlinie", "Línea GPS de teletransporte", "Ligne GPS de téléportation", "Linea GPS di teletrasporto", "순간이동 GPS 선", "Linia GPS teleportacji", "テレポート GPS ライン", "Linha GPS de teleporte", "GPS-линия телепортации", "传送 GPS 路线"}},
+    {{"GPS helper unavailable", "GPS 協助程式不可用", "GPS-Helfer nicht verfügbar", "Asistente GPS no disponible", "Assistant GPS indisponible", "Assistente GPS non disponibile", "GPS 도우미를 사용할 수 없음", "Pomocnik GPS niedostępny", "GPS ヘルパーは利用できません", "Auxiliar GPS indisponível", "Помощник GPS недоступен", "GPS 助手不可用"}},
+    {{"Waiting for destination", "等待目的地", "Warte auf Ziel", "Esperando destino", "En attente d’une destination", "In attesa della destinazione", "목적지 대기 중", "Oczekiwanie na cel", "目的地を待機中", "Aguardando destino", "Ожидание пункта назначения", "等待目的地"}},
+    {{"Calculating route", "計算路線中", "Route wird berechnet", "Calculando ruta", "Calcul de l’itinéraire", "Calcolo del percorso", "경로 계산 중", "Obliczanie trasy", "ルートを計算中", "Calculando rota", "Расчёт маршрута", "正在计算路线"}},
+    {{"No route", "無路線", "Keine Route", "Sin ruta", "Aucun itinéraire", "Nessun percorso", "경로 없음", "Brak trasy", "ルートなし", "Sem rota", "Нет маршрута", "无路线"}},
+    {{"Route ready", "路線就緒", "Route bereit", "Ruta lista", "Itinéraire prêt", "Percorso pronto", "경로 준비됨", "Trasa gotowa", "ルート準備完了", "Rota pronta", "Маршрут готов", "路线就绪"}},
     {{"Shape", "形狀", "Form", "Forma", "Forme", "Forma", "모양", "Kształt", "形状", "Forma", "Форма", "形状"}},
     {{"Player Cross", "玩家十字", "Spielerkreuz", "Cruz de jugador", "Croix de joueur", "Croce giocatore", "플레이어 십자", "Krzyż gracza", "プレイヤークロス", "Cruz de jogador", "Крест игрока", "玩家十字"}},
     {{"Dot", "圓點", "Punkt", "Punto", "Point", "Punto", "점", "Kropka", "点", "Ponto", "Точка", "圆点"}},
@@ -199,23 +208,15 @@ auto DetectUiLanguageFromFingerprint(
 
 auto RefreshUiLanguage(const D2RL::PluginContext* context) noexcept -> bool {
     if (context == nullptr) return false;
-    const D2RL::LocalizationServiceV1* service{};
-    if (context->QueryService(
-            D2RL::ServiceId::Localization,
-            D2RL::LocalizationServiceV1Version,
-            &service) != D2RL::ServiceQueryResult::Success
-        || !D2RL::HasLocalizationServiceV1Field(
-            service,
-            D2RL::LocalizationServiceV1RequiredSize)
-        || service->getStringByKey == nullptr) {
-        return false;
-    }
+    RuffnecKk::Localization::Service service;
+    if (!service.Bind(context)) return false;
 
     std::array<char, 128> buffer{};
     std::uint32_t required{};
-    const auto result = service->getStringByKey(
+    const auto result = service.GetStringByKey(
         context,
         "ItemStats1h",
+        "d2r:ItemStats1h",
         buffer.data(),
         static_cast<std::uint32_t>(buffer.size()),
         &required);

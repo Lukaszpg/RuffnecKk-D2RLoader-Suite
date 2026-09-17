@@ -250,6 +250,20 @@ auto AutomapLabelMetrics::Spacing(float referencePixels) const noexcept -> float
     return std::max(1.0F, referencePixels * resolutionScale * userScale);
 }
 
+auto AutomapLabelMetrics::IconTopExtentForViewport(
+        float referencePixels, float viewportScale) const noexcept -> float {
+    const auto scale = std::isfinite(viewportScale)
+        ? std::clamp(viewportScale, 0.25F, 1.0F) : 1.0F;
+    return IconTopExtent(referencePixels) * scale;
+}
+
+auto AutomapLabelMetrics::SpacingForViewport(
+        float referencePixels, float viewportScale) const noexcept -> float {
+    const auto scale = std::isfinite(viewportScale)
+        ? std::clamp(viewportScale, 0.25F, 1.0F) : 1.0F;
+    return std::max(1.0F, Spacing(referencePixels) * scale);
+}
+
 auto ComputeColoredImmunityIndicatorAdvance(float fontSize) -> float {
     ValidatePositive(
         fontSize,

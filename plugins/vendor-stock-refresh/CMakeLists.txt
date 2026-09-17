@@ -16,10 +16,46 @@ d2rlplugin_embed_config(
 )
 
 if(BUILD_TESTING)
+    set(RUFFNECKK_VENDOR_STOCK_REFRESH_D2RCORE_CANDIDATE "" CACHE FILEPATH
+        "Optional D2RCore.dll used by Vendor Stock Refresh's exact PE contract test")
     add_executable(ruffneckk_vendor_stock_refresh_tests tests/policy_tests.cpp)
     target_compile_features(ruffneckk_vendor_stock_refresh_tests PRIVATE cxx_std_20)
     target_include_directories(ruffneckk_vendor_stock_refresh_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(ruffneckk_vendor_stock_refresh_tests PRIVATE /W4 /WX)
+    endif()
+    set(ruffneckk_vendor_stock_refresh_test_arguments
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/ruffneckk-vendor-stock-refresh.toml")
+    if(EXISTS "${RUFFNECKK_VENDOR_STOCK_REFRESH_D2RCORE_CANDIDATE}")
+        list(APPEND ruffneckk_vendor_stock_refresh_test_arguments
+            "${RUFFNECKK_VENDOR_STOCK_REFRESH_D2RCORE_CANDIDATE}")
+    endif()
     add_test(NAME ruffneckk.vendor-stock-refresh.policy
         COMMAND ruffneckk_vendor_stock_refresh_tests
-            "${CMAKE_CURRENT_SOURCE_DIR}/config/ruffneckk-vendor-stock-refresh.toml")
+            ${ruffneckk_vendor_stock_refresh_test_arguments})
+
+    add_executable(
+        ruffneckk_vendor_stock_refresh_metadata_tests
+        tests/metadata_tests.cpp
+    )
+    target_link_libraries(
+        ruffneckk_vendor_stock_refresh_metadata_tests
+        PRIVATE
+            RuffnecKk::CommonV4
+            ruffneckk_vendor_stock_refresh
+    )
+    target_compile_features(
+        ruffneckk_vendor_stock_refresh_metadata_tests
+        PRIVATE cxx_std_20
+    )
+    if(MSVC)
+        target_compile_options(
+            ruffneckk_vendor_stock_refresh_metadata_tests
+            PRIVATE /W4 /WX
+        )
+    endif()
+    add_test(
+        NAME ruffneckk.vendor-stock-refresh.metadata
+        COMMAND ruffneckk_vendor_stock_refresh_metadata_tests
+    )
 endif()

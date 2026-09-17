@@ -1,4 +1,5 @@
 #include "d3d12_imgui_host.hpp"
+#include "d3d12_gpu_diagnostics.hpp"
 #include "automap_sprite_package.hpp"
 #include "ui_localization.hpp"
 #include "localized_fonts.hpp"
@@ -104,6 +105,8 @@ constexpr UINT AutomapSpriteSrvDescriptorIndex = 3U;
 
 [[nodiscard]] auto WaitForFenceValueLocked(
     std::uint64_t value) noexcept -> bool;
+[[nodiscard]] auto SignalGpuFenceLocked(
+    std::uint64_t value, const char* operation) noexcept -> bool;
 
 // Exact transparent PrimeMH artwork by Joffreybesos, embedded with permission
 // obtained by Vincent Barriere on 2026-08-30. Keeping the original compressed
@@ -1038,6 +1041,10 @@ private:
             IID_PPV_ARGS(&texture)))) {
         return false;
     }
+    GpuDiagnostics::NameObject(texture.Get(),
+        descriptorIndex == PrimeMhChestSrvDescriptorIndex ? L"RuffnecKk MapSense chest texture"
+        : descriptorIndex == PrimeMhSuperChestSrvDescriptorIndex ? L"RuffnecKk MapSense special chest texture"
+        : L"RuffnecKk MapSense automap sprite texture");
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rowCount{};
@@ -1086,6 +1093,7 @@ private:
         texture.Reset();
         return false;
     }
+    GpuDiagnostics::NameObject(upload.Get(), L"RuffnecKk MapSense texture upload buffer");
 
     void* mapped{};
     D3D12_RANGE noReadRange{0U, 0U};
@@ -1244,7 +1252,8 @@ private:
     ID3D12CommandList* const commandLists[]{CommandList.Get()};
     CommandQueue->ExecuteCommandLists(1U, commandLists);
     const std::uint64_t fenceValue = NextFenceValue++;
-    if (FAILED(CommandQueue->Signal(Fence.Get(), fenceValue))
+    GpuDiagnostics::RecordSubmission(fenceValue, "PrimeMH texture upload");
+    if (!SignalGpuFenceLocked(fenceValue, "PrimeMH upload signal")
         || !WaitForFenceValueLocked(fenceValue)) {
         // The resources and upload buffers stay owned until renderer reset so
         // a late GPU completion can never dereference released upload memory.
@@ -1342,7 +1351,8 @@ private:
     ID3D12CommandList* const commandLists[]{CommandList.Get()};
     CommandQueue->ExecuteCommandLists(1U, commandLists);
     const std::uint64_t fenceValue = NextFenceValue++;
-    if (FAILED(CommandQueue->Signal(Fence.Get(), fenceValue))
+    GpuDiagnostics::RecordSubmission(fenceValue, "automap sprite upload");
+    if (!SignalGpuFenceLocked(fenceValue, "automap sprite upload signal")
         || !WaitForFenceValueLocked(fenceValue)) {
         // Retain both resources until reset if the GPU completion is late.
         AutomapSpriteTextureView = {};
@@ -1896,18 +1906,55 @@ auto PinHostModuleForResidualSubclass() noexcept -> bool {
         &module) != FALSE;
 }
 
+void RecordGpuFailureLocked(const char* operation, HRESULT result) noexcept {
+    if constexpr (GpuDiagnostics::Enabled) {
+        ComPtr<ID3D12Device> device;
+        if (CommandQueue != nullptr)
+            static_cast<void>(CommandQueue->GetDevice(IID_PPV_ARGS(&device)));
+        GpuDiagnostics::RecordFailure(device.Get(), operation, result, LogWarning);
+    }
+}
+
 auto WaitForFenceValueLocked(std::uint64_t value) noexcept -> bool {
-    if (value == 0U || !Fence || !FenceEvent) return true;
-    if (Fence->GetCompletedValue() >= value) return true;
-    if (FAILED(Fence->SetEventOnCompletion(value, FenceEvent))) return false;
-    return WaitForSingleObject(FenceEvent, FenceWaitMilliseconds)
-        == WAIT_OBJECT_0;
+    if (!Fence || !FenceEvent) return value == 0U && !RendererPoisoned;
+    HRESULT armResult = S_OK;
+    const auto result = GpuDiagnostics::AwaitFence(
+        value,
+        []() noexcept { return Fence->GetCompletedValue(); },
+        [&](std::uint64_t target) noexcept {
+            armResult = Fence->SetEventOnCompletion(target, FenceEvent);
+            return SUCCEEDED(armResult);
+        },
+        []() noexcept {
+            return WaitForSingleObject(FenceEvent, FenceWaitMilliseconds)
+                == WAIT_OBJECT_0;
+        });
+    if (result == GpuDiagnostics::FenceResult::Complete) return true;
+    RendererPoisoned = true;
+    RendererInitializedPublished.store(false, std::memory_order_release);
+    const bool removed = result == GpuDiagnostics::FenceResult::DeviceRemoved;
+    RecordGpuFailureLocked(removed ? "fence device removal" : "fence completion",
+        removed ? DXGI_ERROR_DEVICE_REMOVED : FAILED(armResult) ? armResult : E_FAIL);
+    LogWarning(removed
+        ? "MapSense: GPU rendering disabled because its fence reports device removal; UINT64_MAX is not completion."
+        : "MapSense: GPU rendering disabled because fence completion was not proven after the wait.");
+    return false;
+}
+
+auto SignalGpuFenceLocked(std::uint64_t value, const char* operation) noexcept -> bool {
+    const HRESULT result = CommandQueue && Fence && value != GpuDiagnostics::RemovedFenceValue
+        ? CommandQueue->Signal(Fence.Get(), value) : E_INVALIDARG;
+    if (SUCCEEDED(result)) return true;
+    RendererPoisoned = true;
+    RendererInitializedPublished.store(false, std::memory_order_release);
+    RecordGpuFailureLocked(operation, result);
+    return false;
 }
 
 auto WaitForGpuIdleLocked() noexcept -> bool {
     if (!CommandQueue || !Fence || !FenceEvent) return true;
     const std::uint64_t value = NextFenceValue++;
-    if (FAILED(CommandQueue->Signal(Fence.Get(), value))) return false;
+    if (!SignalGpuFenceLocked(value, "GPU idle signal")) return false;
     return WaitForFenceValueLocked(value);
 }
 
@@ -2216,6 +2263,7 @@ auto InitializeRenderer(
                 4,
                 "MapSense: renderer initialization failed at SRV heap creation.");
         }
+        GpuDiagnostics::NameObject(SrvHeap.Get(), L"RuffnecKk MapSense SRV heap");
 
         D3D12_DESCRIPTOR_HEAP_DESC rtvDesc{};
         rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -2227,6 +2275,7 @@ auto InitializeRenderer(
                 5,
                 "MapSense: renderer initialization failed at RTV heap creation.");
         }
+        GpuDiagnostics::NameObject(RtvHeap.Get(), L"RuffnecKk MapSense RTV heap");
 
         Frames.clear();
         Frames.resize(swapDesc.BufferCount);
@@ -2242,6 +2291,7 @@ auto InitializeRenderer(
                     6,
                     "MapSense: renderer initialization failed at command allocator creation.");
             }
+            GpuDiagnostics::NameObject(frame.allocator.Get(), L"RuffnecKk MapSense frame allocator");
             if (FAILED(swapChain->GetBuffer(
                     index,
                     IID_PPV_ARGS(&frame.renderTarget)))) {
@@ -2267,6 +2317,7 @@ auto InitializeRenderer(
                 8,
                 "MapSense: renderer initialization failed at command-list creation.");
         }
+        GpuDiagnostics::NameObject(CommandList.Get(), L"RuffnecKk MapSense host command list");
         if (FAILED(CommandList->Close())) {
             return FailRendererInitialization(
                 9,
@@ -2280,6 +2331,7 @@ auto InitializeRenderer(
                 10,
                 "MapSense: renderer initialization failed at fence creation.");
         }
+        GpuDiagnostics::NameObject(Fence.Get(), L"RuffnecKk MapSense submission fence");
         FenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!FenceEvent) {
             return FailRendererInitialization(
@@ -2365,6 +2417,9 @@ auto InitializeRenderer(
             LogWarning(
                 "MapSense: PrimeMH chest textures could not be initialized; chest markers use the procedural fallback.");
         }
+        if (RendererPoisoned)
+            return FailRendererInitialization(18,
+                "MapSense: renderer initialization stopped after GPU synchronization failed.");
         if (MapSenseAutomapSpritePath.empty()) {
             // The duplicate external terrain underlay is intentionally
             // retired. An absent path is the configured state, not a failed
@@ -2384,6 +2439,9 @@ auto InitializeRenderer(
                 "MapSense: automap sprite atlas is unavailable or invalid; the generated map underlay remains fail-closed.");
         }
 
+        if (RendererPoisoned)
+            return FailRendererInitialization(18,
+                "MapSense: renderer initialization stopped after GPU synchronization failed.");
         LastFrameTime = std::chrono::steady_clock::now();
         RendererInitialized = true;
         RendererInitializedPublished.store(true, std::memory_order_release);
@@ -2537,6 +2595,7 @@ auto RenderPanelFrame(
     if (FAILED(result)) {
         RendererPoisoned = true;
         RendererInitializedPublished.store(false, std::memory_order_release);
+        RecordGpuFailureLocked("command allocator reset", result);
         LogWarning(
             "MapSense: GPU rendering disabled after command-allocator reset failed.");
         return false;
@@ -2545,6 +2604,7 @@ auto RenderPanelFrame(
     if (FAILED(result)) {
         RendererPoisoned = true;
         RendererInitializedPublished.store(false, std::memory_order_release);
+        RecordGpuFailureLocked("command list reset", result);
         LogWarning(
             "MapSense: GPU rendering disabled after command-list reset failed.");
         return false;
@@ -2570,6 +2630,7 @@ auto RenderPanelFrame(
     if (FAILED(result)) {
         RendererPoisoned = true;
         RendererInitializedPublished.store(false, std::memory_order_release);
+        RecordGpuFailureLocked("command list close", result);
         LogWarning(
             "MapSense: GPU rendering disabled after command-list close failed.");
         return false;
@@ -2578,8 +2639,8 @@ auto RenderPanelFrame(
     ID3D12CommandList* commandLists[]{CommandList.Get()};
     CommandQueue->ExecuteCommandLists(1U, commandLists);
     const std::uint64_t fenceValue = NextFenceValue++;
-    result = CommandQueue->Signal(Fence.Get(), fenceValue);
-    if (FAILED(result)) {
+    GpuDiagnostics::RecordSubmission(fenceValue, "overlay draw");
+    if (!SignalGpuFenceLocked(fenceValue, "overlay signal")) {
         RendererPoisoned = true;
         RendererInitializedPublished.store(false, std::memory_order_release);
         LogWarning(
@@ -2613,6 +2674,7 @@ void RecordDeviceRemovalLocked(
         && SUCCEEDED(swapChain->GetDevice(IID_PPV_ARGS(&device)))) {
         deviceReason = device->GetDeviceRemovedReason();
     }
+    GpuDiagnostics::RecordFailure(device.Get(), "Present", presentResult, LogWarning);
     char message[256]{};
     const int written = std::snprintf(
         message,
@@ -3004,6 +3066,7 @@ auto TryInstallD3D12ImGuiHooks() noexcept -> bool {
     std::scoped_lock lock(HostMutex);
     if (HooksInstalled) return true;
     if (!Configured) return false;
+    GpuDiagnostics::ConfigureBeforeDeviceCreation(LogInfo, LogWarning);
 
     if (!MinHookReady) {
         const MH_STATUS initialized = MH_Initialize();

@@ -212,6 +212,10 @@ struct AutomapLabelMetrics final {
     [[nodiscard]] auto TextSize(float referencePixels) const noexcept -> float;
     [[nodiscard]] auto IconTopExtent(float referencePixels) const noexcept -> float;
     [[nodiscard]] auto Spacing(float referencePixels) const noexcept -> float;
+    [[nodiscard]] auto IconTopExtentForViewport(
+        float referencePixels, float viewportScale) const noexcept -> float;
+    [[nodiscard]] auto SpacingForViewport(
+        float referencePixels, float viewportScale) const noexcept -> float;
 };
 
 [[nodiscard]] auto ResolveAutomapLabelMetrics(

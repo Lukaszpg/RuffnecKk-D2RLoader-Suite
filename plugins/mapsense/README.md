@@ -1,6 +1,47 @@
 # RuffnecKk MapSense
 
-RuffnecKk MapSense is a D2RLoader client plugin for Diablo II: Resurrected.
+RuffnecKk MapSense 2.0.0 is a D2RLoader client plugin for Diablo II: Resurrected.
+It adds helper-generated GPS Walking and GPS Teleport routes while retaining the
+independent Direct Line mode. Direct lines require neither the helper nor a
+walkability grid and may cross walls. GPS Walking uses helper-generated routes,
+walkability-grid validation, continuous player following, and verified
+reconnection. GPS Teleport uses helper-generated route steps without applying
+the walking grid. MapSense 2.0.0 targets the D2RLoader 1.3 release environment
+while retaining PluginSDK API v3 as its binary interface.
+
+The prior 1.0.3 compatibility candidate retained 1.0.2 and recognized both the complete
+vanilla automap serializer epilogue and the exact checked 32-bit epilogue owned
+by Automap Serialization Fix 0.1.0. Unknown or partially patched bytes still
+refuse initialization. MapSense never writes this range and does not require
+the fix to be installed. This restores the laboratory's September 3 contract
+in the product source; fresh full-stack and large-payload runtime qualification
+is pending. No save format or map-generator companion changes are required.
+
+The candidate also restores the object/atlas initialization contract for the
+split-byte 16-bit interaction accessors observed with D2RLoader 1.2.2. It accepts
+exactly the complete native getter/setter pair or the complete extended pair,
+including both executable relays, their field offsets, register/stack behavior,
+and exact return targets. Unknown, unreadable or partial patches remain refused.
+The existing uint32 result is preserved; MapSense installs no additional hook
+and never selects a contract from the Loader or game version. The startup and
+status logs now report Reveal Map's atlas availability explicitly.
+
+Shrine names now follow the native automap viewport size. Fullscreen automap
+placement remains byte-for-byte equivalent at the rendering-policy boundary,
+while the top-right minimap scales only the native-icon clearance and label gap.
+Text size and every other automap label remain unchanged.
+
+The strict Release build and all four CTest targets pass, including 2,846
+contract checks. The compiled read-only probe accepts the live extended pair
+and all 12 remaining POI witnesses match in the current diagnostic session.
+The exact GPU diagnostic candidate subsequently passed a fresh Loader 1.2.2
+startup with the extended accessors and atlas active. Native atlas publication
+completed across Acts I and II, and Vincent confirmed the missing features had
+returned. This run retained prior diagnostic plugin isolations. Full-stack
+qualification and runtime validation of the normal public binary remain open;
+the optional GPU diagnostic build remains excluded from public release.
+
+
 Version 1.0.2 rebuilds the required map-generator companion for Zig's portable
 x86-64 baseline and adds a release gate that rejects VEX/EVEX instructions, so
 the packaged helper cannot inherit AVX, AVX2, or AVX-512 from its build host.
@@ -925,7 +966,7 @@ fluidity gates remain to be measured.
 
 ## Configuration migration
 
-MapSense 1.0.2 writes configuration schema 17. Existing schemas 1 through 16 are
+MapSense writes configuration schema 18. Existing schemas 1 through 17 are
 accepted only when they do not contain a removed key. Schemas 1 through 3
 migrate with `x` for every category, preserving
 the earlier hollow angular-cross appearance instead of silently changing marker
@@ -960,7 +1001,9 @@ red quest family and
 exposes its switch and color in the in-game menu. Because schema 7 kept the
 reserved quest switch hidden and disabled, its exact old false value migrates
 once to enabled; schema 8 then preserves the player's explicit choice. Saving
-any accepted legacy configuration writes schema 17.
+any accepted legacy configuration writes schema 18. Schema 18 assigns one
+line mode to each destination family: `direct`, `gps_walk`, or
+`gps_teleport`. Older schemas migrate every family to `direct`.
 
 Schema 10 adds the optional boss-name fields and the complete `objects`
 section. Older schemas migrate to the documented 0.13.0 defaults: yellow exit

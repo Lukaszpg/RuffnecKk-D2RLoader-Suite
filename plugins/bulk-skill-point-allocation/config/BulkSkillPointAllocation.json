@@ -12,6 +12,11 @@
     // Set this to true to show a confirmation first.
     "confirmShiftAllocation": false,
 
+    // Optional shiftConfirmationKey is passed to the localization service
+    // unchanged. With namespaced localization, use d2r:<key> for game/mod
+    // strings or the explicit owning plugin namespace. An unqualified key
+    // belongs to this plugin; no namespace is guessed for a configured key.
+
     // Write extra allocation details to the D2RLoader log. Leave this disabled
     // during normal play; startup messages and errors are always logged.
     "diagnostics": false

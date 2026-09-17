@@ -5,6 +5,7 @@
 #include "native_automap_poi.hpp"
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include <Windows.h>
 
@@ -32,8 +33,6 @@ constexpr std::uintptr_t GetNativeHeightRva = 0x07F4A0;
 constexpr std::uintptr_t GetNativeWidthRva = 0x07F510;
 constexpr std::uintptr_t ProjectClientToAutomapRva = 0x0D4910;
 constexpr std::uintptr_t RenderAutomapUnitRva = 0x0D76E0;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
-constexpr std::uintptr_t GetUnitAlignmentRva = 0x2F4190;
 constexpr std::uintptr_t GetUnitIdRva = 0x34A330;
 constexpr std::uintptr_t GetUnitDataContextRva = 0x34A0E0;
 constexpr std::uintptr_t GetUnitModeRva = 0x34AB60;
@@ -79,6 +78,7 @@ constexpr std::int32_t FireResistanceStatId = 39;
 constexpr std::int32_t LightningResistanceStatId = 41;
 constexpr std::int32_t ColdResistanceStatId = 43;
 constexpr std::int32_t PoisonResistanceStatId = 45;
+constexpr std::uint16_t NativeBaseStatLayer = 0U;
 constexpr std::uint64_t MarkerLifetimeMilliseconds = 250;
 // Discovery is deliberately slower than the bounded live refresh. Positions
 // are refreshed from copied unit ids; repeating the full metadata/immunity
@@ -181,12 +181,7 @@ struct ObservationBuffer final {
 using GetLocalDataContextFn = std::int32_t(__fastcall*)() noexcept;
 using GetLocalPlayerFn = void*(__fastcall*)(std::int32_t) noexcept;
 using GetNativeDimensionFn = std::int32_t(__fastcall*)() noexcept;
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    void* unit,
-    std::int32_t statId,
-    std::uint16_t layer) noexcept;
 using GetUnitValueFn = std::uint32_t(__fastcall*)(void*) noexcept;
-using GetUnitSignedValueFn = std::int32_t(__fastcall*)(void*) noexcept;
 using GetUnitDataContextFn = std::uint8_t(__fastcall*)(void*) noexcept;
 using GetUnitCoordinateFn = std::int32_t(__fastcall*)(void*) noexcept;
 using GetNativePointerFn = void*(__fastcall*)(void*) noexcept;
@@ -214,8 +209,7 @@ GetLocalDataContextFn GetLocalDataContext{};
 GetLocalPlayerFn GetLocalPlayer{};
 GetNativeDimensionFn GetNativeHeight{};
 GetNativeDimensionFn GetNativeWidth{};
-GetUnitStatFn GetUnitStat{};
-GetUnitSignedValueFn GetUnitAlignment{};
+RuffnecKk::NativeStatCompat::Adapter UnitStatAdapter{};
 GetUnitValueFn GetUnitId{};
 GetUnitDataContextFn GetUnitDataContext{};
 GetUnitValueFn GetUnitMode{};
@@ -304,6 +298,14 @@ std::atomic<std::uint64_t> MaximumAcceptedDistanceSquared{};
 std::atomic<std::uint64_t> MaximumPublishedDistanceSquared{};
 std::atomic<NativeAutomapLevelObservedCallback> LevelObservedCallback{};
 std::atomic<void*> LevelObservedUserData{};
+std::atomic<std::uint64_t> NativeNavigationLocalPlayerPasses{};
+std::atomic<std::uint64_t> NativeNavigationDeadPlayerPasses{};
+std::atomic<std::uint64_t> NativeNavigationObservationAttempts{};
+std::atomic<std::uint64_t> NativeNavigationMissingDependencies{};
+std::atomic<std::uint64_t> NativeNavigationLevelReadFailures{};
+std::atomic<std::uint64_t> NativeNavigationViewportFailures{};
+std::atomic<std::uint64_t> NativeNavigationCoordinatedPasses{};
+std::atomic<std::uint64_t> NativeNavigationFaults{};
 
 static_assert(std::is_trivially_copyable_v<NativeAutomapMarkerSnapshot>);
 static_assert(std::is_standard_layout_v<NativeAutomapMarkerSnapshot>);
@@ -394,6 +396,37 @@ auto IsRecent(
         inTown = IsRoomInTown(activeRoom) != 0;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+[[nodiscard]] __declspec(noinline) auto TryReadNavigationPlayerSubtile(
+        void* player,
+        NavigationNativePoint& output) noexcept -> bool {
+    __try {
+        if (!IsAlignedPointer(player) || GetDynamicPath == nullptr
+            || PathGetX == nullptr || PathGetY == nullptr) {
+            return false;
+        }
+        // The admitted accessors own the dynamic-path world-subtile contract
+        // (+0x02/+0x06); do not substitute static-path field offsets here.
+        void* const playerPath = GetDynamicPath(player);
+        if (!IsAlignedPointer(playerPath)) return false;
+        const auto playerSubtileX = PathGetX(playerPath);
+        const auto playerSubtileY = PathGetY(playerPath);
+        constexpr auto MaximumPathCoordinate = static_cast<std::int32_t>(
+            (std::numeric_limits<std::uint16_t>::max)());
+        if (playerSubtileX < 0 || playerSubtileX > MaximumPathCoordinate
+            || playerSubtileY < 0 || playerSubtileY > MaximumPathCoordinate) {
+            return false;
+        }
+        output = {
+            .x = playerSubtileX,
+            .y = playerSubtileY,
+        };
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
@@ -575,34 +608,50 @@ void LogNavigationProjectionDiagnostic(
 void ObserveNavigationPlayerPass(
         void* player,
         void* automapContext) noexcept {
+    NativeNavigationObservationAttempts.fetch_add(1U, std::memory_order_relaxed);
     __try {
         if (player == nullptr || automapContext == nullptr
             || GetNativeHeight == nullptr || GetNativeWidth == nullptr
             || GetUnitClientX == nullptr || GetUnitClientY == nullptr
             || ProjectClientToAutomap == nullptr) {
+            NativeNavigationMissingDependencies.fetch_add(
+                1U, std::memory_order_relaxed);
             return;
         }
 
         std::int32_t currentLevelId{UnknownNavigationLevelId};
         bool inTown{};
-        if (!TryReadCurrentLevelId(player, currentLevelId, inTown)) return;
+        if (!TryReadCurrentLevelId(player, currentLevelId, inTown)) {
+            NativeNavigationLevelReadFailures.fetch_add(
+                1U, std::memory_order_relaxed);
+            return;
+        }
 
         const auto nativeWidth = GetNativeWidth();
         const auto nativeHeight = GetNativeHeight();
         if (nativeWidth <= 0 || nativeHeight <= 0
             || nativeWidth > 32768 || nativeHeight > 32768) {
-            return;
+            NativeNavigationViewportFailures.fetch_add(
+                1U, std::memory_order_relaxed);
         }
+        // Player-origin observation is independent of valid render dimensions.
+        // The engine and downstream viewport/POI consumers reject dimensions
+        // where their own projection work requires them.
         const auto* const contextBytes = static_cast<const std::uint8_t*>(
             automapContext);
         const auto* const diagnosticContext = DiagnosticContext;
         const auto playerClientX = GetUnitClientX(player);
         const auto playerClientY = GetUnitClientY(player);
+        NavigationNativePoint playerSubtile{};
+        const bool hasPlayerSubtile = TryReadNavigationPlayerSubtile(
+            player, playerSubtile);
         const NavigationAutomapPass pass{
             .currentLevelId = currentLevelId,
             .inTown = inTown,
             .playerClientX = playerClientX,
             .playerClientY = playerClientY,
+            .hasPlayerSubtile = hasPlayerSubtile,
+            .playerSubtile = playerSubtile,
             .nativeWidth = nativeWidth,
             .nativeHeight = nativeHeight,
             .clipLeft = *reinterpret_cast<const std::int32_t*>(
@@ -638,33 +687,32 @@ void ObserveNavigationPlayerPass(
             PublishedNativeAutomapViewport = viewport;
             NativeAutomapViewportLock.clear(std::memory_order_release);
         }
-        const auto observation = ObserveNavigationAutomapPass(pass);
-        ObserveNativeAutomapPoiPass(NativeAutomapPoiPass{
-            .currentLevelId = currentLevelId,
-            .inTown = inTown,
-            .playerClientX = pass.playerClientX,
-            .playerClientY = pass.playerClientY,
-            .nativeWidth = nativeWidth,
-            .nativeHeight = nativeHeight,
-            .clipLeft = pass.clipLeft,
-            .clipTop = pass.clipTop,
-            .clipWidth = pass.clipWidth,
-            .clipHeight = pass.clipHeight,
-            .projectClient = pass.projectClient,
-            .borrowedAutomapContext = automapContext,
-        });
-        const auto callback = LevelObservedCallback.load(
-            std::memory_order_acquire);
-        if (callback != nullptr) {
-            callback(
-                currentLevelId,
-                ShouldRequestNavigationRefresh(observation, inTown),
-                LevelObservedUserData.load(std::memory_order_acquire));
-        }
+        RunNativeAutomapObservation(pass, [&]() noexcept {
+            const auto observation = ObserveNavigationAutomapPass(pass);
+            ObserveNativeAutomapPoiPass(NativeAutomapPoiPass{
+                .currentLevelId = currentLevelId,
+                .inTown = inTown,
+                .playerClientX = pass.playerClientX,
+                .playerClientY = pass.playerClientY,
+                .nativeWidth = nativeWidth,
+                .nativeHeight = nativeHeight,
+                .clipLeft = pass.clipLeft,
+                .clipTop = pass.clipTop,
+                .clipWidth = pass.clipWidth,
+                .clipHeight = pass.clipHeight,
+                .projectClient = pass.projectClient,
+                .borrowedAutomapContext = automapContext,
+            });
+            return observation;
+        }, LevelObservedCallback.load(std::memory_order_acquire),
+            LevelObservedUserData.load(std::memory_order_acquire));
+        NativeNavigationCoordinatedPasses.fetch_add(
+            1U, std::memory_order_relaxed);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         // Navigation is an optional observer. A bad transient native object
         // suppresses this pulse without affecting D2R or monster markers.
+        NativeNavigationFaults.fetch_add(1U, std::memory_order_relaxed);
     }
 }
 
@@ -882,7 +930,10 @@ auto DiscoverTrackedMonster(
         TrackedMonster& tracked) noexcept -> bool {
     __try {
         if (!IsAlignedPointer(unit)
-            || GetUnitStat == nullptr || GetUnitAlignment == nullptr
+            || !UnitStatAdapter.IsBound(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+            || !UnitStatAdapter.IsBound(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitAlignment)
             || GetUnitId == nullptr
             || GetUnitDataContext == nullptr || GetUnitMode == nullptr
             || GetDynamicPath == nullptr
@@ -942,7 +993,7 @@ auto DiscoverTrackedMonster(
         // returns zero for a missing stat, which is indistinguishable from
         // Evil and previously admitted NPCs and scenery actors by accident.
         if (!Detail::IsEnemyMarkerAlignmentEligible(
-                GetUnitAlignment(unit))) {
+                UnitStatAdapter.GetUnitAlignment(unit))) {
             AlignmentRejected.fetch_add(1U, std::memory_order_relaxed);
             return false;
         }
@@ -989,12 +1040,18 @@ auto DiscoverTrackedMonster(
         if (ImmunityCollectionEnabled.load(std::memory_order_acquire)) {
             tracked.immunityMask = Detail::BuildMonsterImmunityMask(
                 std::array<std::int32_t, 6>{
-                GetUnitStat(unit, PhysicalResistanceStatId, 0U),
-                GetUnitStat(unit, FireResistanceStatId, 0U),
-                GetUnitStat(unit, ColdResistanceStatId, 0U),
-                GetUnitStat(unit, LightningResistanceStatId, 0U),
-                GetUnitStat(unit, PoisonResistanceStatId, 0U),
-                GetUnitStat(unit, MagicResistanceStatId, 0U),
+                UnitStatAdapter.GetUnitStat(
+                    unit, PhysicalResistanceStatId, NativeBaseStatLayer),
+                UnitStatAdapter.GetUnitStat(
+                    unit, FireResistanceStatId, NativeBaseStatLayer),
+                UnitStatAdapter.GetUnitStat(
+                    unit, ColdResistanceStatId, NativeBaseStatLayer),
+                UnitStatAdapter.GetUnitStat(
+                    unit, LightningResistanceStatId, NativeBaseStatLayer),
+                UnitStatAdapter.GetUnitStat(
+                    unit, PoisonResistanceStatId, NativeBaseStatLayer),
+                UnitStatAdapter.GetUnitStat(
+                    unit, MagicResistanceStatId, NativeBaseStatLayer),
             });
         }
         return true;
@@ -1294,7 +1351,11 @@ __declspec(noinline) void __fastcall HookRenderAutomapUnit(
     // native pointer or context after the pass returns.
     void* const player = TryGetLocalPlayerPass(unit);
     if (player == nullptr) return;
+    NativeNavigationLocalPlayerPasses.fetch_add(
+        1U, std::memory_order_relaxed);
     if (!IsObservedLocalPlayerAlive(player)) {
+        NativeNavigationDeadPlayerPasses.fetch_add(
+            1U, std::memory_order_relaxed);
         LocalPlayerFrameAlive.store(false, std::memory_order_release);
         return;
     }
@@ -1377,16 +1438,6 @@ auto ValidateRuntime(const D2RL::PluginContext* context) noexcept -> bool {
         0xEC, 0x40, 0x48, 0x8B, 0xFA, 0x4C, 0x8D, 0x44,
         0x24, 0x68, 0x48, 0x8D, 0x54, 0x24, 0x60, 0x48,
         0x8B, 0xE9, 0xE8, 0xF1, 0x01, 0x00, 0x00, 0x84};
-    constexpr std::array<std::uint8_t, 32> getUnitStatExpected{
-        0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C,
-        0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57,
-        0x48, 0x83, 0xEC, 0x20, 0x41, 0x0F, 0xB7, 0xE8,
-        0x8B, 0xFA, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9};
-    constexpr std::array<std::uint8_t, 32> getUnitAlignmentExpected{
-        0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x74,
-        0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48,
-        0x8B, 0xF1, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88,
-        0x4C, 0x24, 0x40, 0x48, 0x8D, 0x4C, 0x24, 0x40};
     constexpr std::array<std::uint8_t, 32> getXExpected{
         0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
         0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C,
@@ -1520,8 +1571,6 @@ auto ValidateRuntime(const D2RL::PluginContext* context) noexcept -> bool {
         && check(GetNativeHeightRva, nativeHeightExpected)
         && check(GetNativeWidthRva, nativeWidthExpected)
         && check(ProjectClientToAutomapRva, projectExpected)
-        && check(GetUnitStatRva, getUnitStatExpected)
-        && check(GetUnitAlignmentRva, getUnitAlignmentExpected)
         && check(GetUnitIdRva, getUnitIdExpected)
         && check(
             NativeUnitIdentityLayoutWitnessRva,
@@ -1570,6 +1619,19 @@ auto InitializeNativeAutomapMarker(
     if (!ValidateRuntime(context)) {
         context->LogWarn(
             "MapSense: native automap marker signature or ABI mismatch; marker hook refused.");
+        return false;
+    }
+    RuffnecKk::NativeStatCompat::Adapter candidateUnitStatAdapter{};
+    constexpr auto requiredStatHelpers =
+        RuffnecKk::NativeStatCompat::ToMask(
+            RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+        | RuffnecKk::NativeStatCompat::ToMask(
+            RuffnecKk::NativeStatCompat::Helper::GetUnitAlignment);
+    if (!candidateUnitStatAdapter.BindCurrentProcess(
+            context->exeBase,
+            requiredStatHelpers)) {
+        context->LogWarn(
+            "MapSense: native stat compatibility admission failed; marker hook refused.");
         return false;
     }
     DiagnosticContext = navigationProjectionDiagnosticsEnabled
@@ -1622,8 +1684,6 @@ auto InitializeNativeAutomapMarker(
     GetLocalPlayer = At<GetLocalPlayerFn>(GetLocalPlayerRva);
     GetNativeHeight = At<GetNativeDimensionFn>(GetNativeHeightRva);
     GetNativeWidth = At<GetNativeDimensionFn>(GetNativeWidthRva);
-    GetUnitStat = At<GetUnitStatFn>(GetUnitStatRva);
-    GetUnitAlignment = At<GetUnitSignedValueFn>(GetUnitAlignmentRva);
     GetUnitId = At<GetUnitValueFn>(GetUnitIdRva);
     GetUnitDataContext = At<GetUnitDataContextFn>(GetUnitDataContextRva);
     GetUnitMode = At<GetUnitValueFn>(GetUnitModeRva);
@@ -1671,8 +1731,6 @@ auto InitializeNativeAutomapMarker(
         GetLocalPlayer = nullptr;
         GetNativeHeight = nullptr;
         GetNativeWidth = nullptr;
-        GetUnitStat = nullptr;
-        GetUnitAlignment = nullptr;
         GetUnitId = nullptr;
         GetUnitDataContext = nullptr;
         GetUnitMode = nullptr;
@@ -1695,6 +1753,10 @@ auto InitializeNativeAutomapMarker(
         return false;
     }
 
+    // The hook remains inactive until this admitted, immutable adapter is
+    // published. Do not reset it during teardown: an in-flight native call
+    // may still use the wrapper while D2RLoader restores the hook.
+    UnitStatAdapter = candidateUnitStatAdapter;
     Active.store(true, std::memory_order_release);
     return true;
 }
@@ -1729,6 +1791,27 @@ void InvalidateNativeAutomapLocalPlayerFrame() noexcept {
 auto IsNativeAutomapLocalPlayerFrameAlive() noexcept -> bool {
     return Active.load(std::memory_order_acquire)
         && LocalPlayerFrameAlive.load(std::memory_order_acquire);
+}
+
+auto GetNativeNavigationObservationCounters() noexcept
+        -> NativeNavigationObservationCounters {
+    return {
+        .localPlayerPasses = NativeNavigationLocalPlayerPasses.load(
+            std::memory_order_relaxed),
+        .deadPlayerPasses = NativeNavigationDeadPlayerPasses.load(
+            std::memory_order_relaxed),
+        .observationAttempts = NativeNavigationObservationAttempts.load(
+            std::memory_order_relaxed),
+        .missingDependencies = NativeNavigationMissingDependencies.load(
+            std::memory_order_relaxed),
+        .levelReadFailures = NativeNavigationLevelReadFailures.load(
+            std::memory_order_relaxed),
+        .viewportFailures = NativeNavigationViewportFailures.load(
+            std::memory_order_relaxed),
+        .coordinatedPasses = NativeNavigationCoordinatedPasses.load(
+            std::memory_order_relaxed),
+        .faults = NativeNavigationFaults.load(std::memory_order_relaxed),
+    };
 }
 
 void SetNativeAutomapMarkerEnabled(bool enabled) noexcept {

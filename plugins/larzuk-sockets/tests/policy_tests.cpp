@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
     static_assert(NativeContract::AddSocketsRva == 0x375560);
     static_assert(NativeContract::LarzukReturnRva == 0x4FD580);
     static_assert(NativeContract::UnitClassIdOffset == 0x04);
-    static_assert(NativeContract::Helpers.size() == 8);
+    static_assert(NativeContract::Helpers.size() == 6);
 
     REQUIRE(argc == 2);
     const std::filesystem::path shippedPath(argv[1]);

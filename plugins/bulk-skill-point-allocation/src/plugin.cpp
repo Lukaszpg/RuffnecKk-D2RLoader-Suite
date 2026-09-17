@@ -1,4 +1,5 @@
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/localization.hpp>
 
 #include "native_contract.hpp"
 #include "policy.hpp"
@@ -46,7 +47,7 @@ Settings ActiveSettings{};
 std::optional<std::filesystem::path> GameplaySource;
 std::optional<std::filesystem::path> StringsSource;
 
-const D2RL::LocalizationServiceV1* LocalizationService{};
+RuffnecKk::Localization::Service LocalizationService;
 const D2RL::SharedEventServiceV1* SharedEventService{};
 D2RL::SharedEvents::ListenerHandle UiListenerHandle{
     D2RL::SharedEvents::InvalidHandle};
@@ -88,7 +89,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-bulk-skill-point-allocation",
     .name = "Bulk Skill Point Allocation",
-    .version = "1.3.4",
+    .version = "1.3.5",
     .author = "RuffnecKk",
     .description =
         "Allocates configurable skill-point batches with Ctrl or all points with Shift.",
@@ -192,25 +193,25 @@ void BeginBulkAllocation(
 
 template<std::size_t Capacity>
 auto FetchLocalizedString(
-    const char* key,
+    const char* legacyKey,
+    const char* v2Key,
     std::array<char, Capacity>& buffer
 ) noexcept -> std::string_view {
     buffer.fill('\0');
-    if (LocalizationService == nullptr
-        || LocalizationService->getStringByKey == nullptr
-        || key == nullptr) {
+    if (!LocalizationService) {
         return {};
     }
     std::uint32_t required{};
-    const auto query = LocalizationService->getStringByKey(
-        Context, key, nullptr, 0, &required);
+    const auto query = LocalizationService.GetStringByKey(
+        Context, legacyKey, v2Key, nullptr, 0, &required);
     if (query != D2RL::Localization::Result::BufferTooSmall
         || required == 0 || required > Capacity) {
         return {};
     }
-    const auto result = LocalizationService->getStringByKey(
+    const auto result = LocalizationService.GetStringByKey(
         Context,
-        key,
+        legacyKey,
+        v2Key,
         buffer.data(),
         static_cast<std::uint32_t>(buffer.size()),
         &required);
@@ -254,9 +255,11 @@ void ResolveConfirmationPrompt() noexcept {
     if (!ActiveSettings.shiftConfirmationKey.empty()) {
         const auto localized = FetchLocalizedString(
             ActiveSettings.shiftConfirmationKey.c_str(),
+            ActiveSettings.shiftConfirmationKey.c_str(),
             ConfirmationPrompt);
         const auto missing = FetchLocalizedString(
             MissingStringKey,
+            "d2r:strMissingString",
             MissingString);
         if (IsUsableLocalizedString(
                 localized,
@@ -268,9 +271,11 @@ void ResolveConfirmationPrompt() noexcept {
 
     const auto primary = FetchLocalizedString(
         PrimaryLocaleProbeKey,
+        "d2r:AssignAllStatPointsConfirmation",
         PrimaryLocaleProbe);
     const auto secondary = FetchLocalizedString(
         SecondaryLocaleProbeKey,
+        "d2r:ControllerPromptAssignSkillPoint",
         SecondaryLocaleProbe);
     if (const auto locale = DetectLocale(primary, secondary)) {
         CopyConfirmationPrompt(ActiveSettings.shiftConfirmations[*locale]);
@@ -392,16 +397,9 @@ void __fastcall HookSendFiveBytePacket(
 
 auto ValidateServiceContracts() noexcept -> bool {
     if (!ActiveSettings.confirmShiftAllocation) return true;
-    if (Context->QueryService(
-            D2RL::ServiceId::Localization,
-            D2RL::LocalizationServiceV1Version,
-            &LocalizationService) != D2RL::ServiceQueryResult::Success
-        || !D2RL::HasLocalizationServiceV1Field(
-            LocalizationService,
-            D2RL::LocalizationServiceV1RequiredSize)
-        || LocalizationService->getStringByKey == nullptr) {
+    if (!LocalizationService.Bind(Context)) {
         Context->LogError(
-            "BulkSkillPointAllocation: Localization v1 is required when Shift confirmation is enabled.");
+            "BulkSkillPointAllocation: a valid Localization service is required when Shift confirmation is enabled.");
         return false;
     }
     if (Context->QueryService(
@@ -566,7 +564,7 @@ void ResetState() noexcept {
         confirmation.clear();
     }
     LocalizationFallbackLogged.store(false, std::memory_order_relaxed);
-    LocalizationService = nullptr;
+    LocalizationService.Reset();
     SharedEventService = nullptr;
     UiListenerHandle = D2RL::SharedEvents::InvalidHandle;
     OriginalSendFiveBytePacket = nullptr;
@@ -635,12 +633,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!ActiveSettings.enabled) {
         try {
             const auto message = std::string(
-                "BulkSkillPointAllocation 1.3.4 by RuffnecKk loaded disabled; no service or hook registered; gameplayConfig=")
+                "BulkSkillPointAllocation 1.3.5 by RuffnecKk loaded disabled; no service or hook registered; gameplayConfig=")
                 + PathForLog(GameplaySource) + ".";
             context->LogInfo(message.c_str());
         } catch (...) {
             context->LogInfo(
-                "BulkSkillPointAllocation 1.3.4 by RuffnecKk loaded disabled; no service or hook registered.");
+                "BulkSkillPointAllocation 1.3.5 by RuffnecKk loaded disabled; no service or hook registered.");
         }
         return true;
     }
@@ -665,7 +663,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
 
     try {
         const auto message = std::string(
-            "BulkSkillPointAllocation 1.3.4 by RuffnecKk loaded; role=Client; ctrl=")
+            "BulkSkillPointAllocation 1.3.5 by RuffnecKk loaded; role=Client; ctrl=")
             + std::to_string(ActiveSettings.skillPointsPerCtrlClick)
             + "; shiftConfirmation="
             + (ActiveSettings.confirmShiftAllocation ? "enabled" : "disabled")
@@ -674,7 +672,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         context->LogInfo(message.c_str());
     } catch (...) {
         context->LogInfo(
-            "BulkSkillPointAllocation 1.3.4 by RuffnecKk loaded.");
+            "BulkSkillPointAllocation 1.3.5 by RuffnecKk loaded.");
     }
     return true;
 }

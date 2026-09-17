@@ -79,6 +79,7 @@ add_library(ruffneckk_floating_damage SHARED
 )
 target_link_libraries(ruffneckk_floating_damage PRIVATE
     RuffnecKk::Common
+    RuffnecKk::NativeStatCompat
     ruffneckk_floating_damage_imgui
     minhook
     dxgi

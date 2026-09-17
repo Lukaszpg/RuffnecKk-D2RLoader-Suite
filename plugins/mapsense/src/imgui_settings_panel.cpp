@@ -820,17 +820,53 @@ struct ImmunityColorControl final {
     return saveRequested;
 }
 
+[[nodiscard]] auto DrawNavigationLineMode(
+        NavigationLineMode& mode) noexcept -> bool {
+    auto changed = false;
+    if (ImGui::RadioButton(UiText(UiTextId::DirectLines),
+            mode == NavigationLineMode::Direct)) {
+        mode = NavigationLineMode::Direct;
+        changed = true;
+    }
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    if (ImGui::RadioButton(UiText(UiTextId::RunWalkGpsLines),
+            mode == NavigationLineMode::GpsWalk)) {
+        mode = NavigationLineMode::GpsWalk;
+        changed = true;
+    }
+    if (ImGui::RadioButton(UiText(UiTextId::TeleportGpsLines),
+            mode == NavigationLineMode::GpsTeleport)) {
+        mode = NavigationLineMode::GpsTeleport;
+        changed = true;
+    }
+#else
+    if (mode != NavigationLineMode::Direct) {
+        ImGui::TextDisabled("%s", UiText(UiTextId::GpsUnavailable));
+    }
+#endif
+    return changed;
+}
+
 [[nodiscard]] auto DrawNavigationLineOptions(
         const char* sectionLabel,
         const char* enabledLabel,
         NavigationLineOptions& options,
-        float dpiScale) noexcept -> bool {
+        float dpiScale,
+        [[maybe_unused]] const char* gpsRouteStatus) noexcept -> bool {
     ImGui::PushID(sectionLabel);
     ImGui::SeparatorText(sectionLabel);
     auto saveRequested = ImGui::Checkbox(enabledLabel, &options.enabled);
-    saveRequested |= DrawMonsterMarkerColor(
-        options.color,
-        dpiScale,
+    ImGui::BeginDisabled(!options.enabled);
+    saveRequested |= DrawNavigationLineMode(options.lineMode);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    if (options.lineMode != NavigationLineMode::Direct && gpsRouteStatus != nullptr) {
+        ImGui::TextDisabled("%s", gpsRouteStatus);
+    }
+#endif
+    ImGui::EndDisabled();
+    saveRequested |= DrawMonsterMarkerColor(options.color, dpiScale,
         UiText(UiTextId::LineColor));
     ImGui::PopID();
     return saveRequested;
@@ -838,15 +874,22 @@ struct ImmunityColorControl final {
 
 [[nodiscard]] auto DrawCustomLevelLineOptions(
         CustomLevelLineOptions& options,
-        float dpiScale) noexcept -> bool {
+        float dpiScale,
+        [[maybe_unused]] const char* gpsRouteStatus) noexcept -> bool {
     ImGui::PushID("CustomLevelLines");
     ImGui::SeparatorText(UiText(UiTextId::CustomLevels));
-    auto saveRequested = ImGui::Checkbox(
-        UiText(UiTextId::CustomLevelLines),
+    auto saveRequested = ImGui::Checkbox(UiText(UiTextId::CustomLevelLines),
         &options.enabled);
-    saveRequested |= DrawMonsterMarkerColor(
-        options.color,
-        dpiScale,
+    ImGui::BeginDisabled(!options.enabled);
+    saveRequested |= DrawNavigationLineMode(options.lineMode);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    if (options.lineMode != NavigationLineMode::Direct && gpsRouteStatus != nullptr) {
+        ImGui::TextDisabled("%s", gpsRouteStatus);
+    }
+#endif
+    ImGui::EndDisabled();
+    saveRequested |= DrawMonsterMarkerColor(options.color, dpiScale,
         UiText(UiTextId::LineColor));
     ImGui::TextDisabled("%s", UiText(UiTextId::CustomTomlHint));
     ImGui::PopID();
@@ -860,7 +903,12 @@ auto DrawImGuiSettingsPanel(
         bool& expanded,
         bool revealMapEnabled,
         float menuScale,
-        const ImGuiSettingsActionCallback actionCallback) noexcept
+        const ImGuiSettingsActionCallback actionCallback
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        , std::array<const char*, NavigationLineKindCount> gpsRouteStatuses
+#endif
+        ) noexcept
         -> ImGuiSettingsBounds {
     const auto dpiScale = std::clamp(menuScale, 1.0F, 2.0F);
     const ScopedPanelStyle style{config.menu.theme, dpiScale};
@@ -1165,20 +1213,48 @@ auto DrawImGuiSettingsPanel(
                     UiText(UiTextId::Waypoint),
                     UiText(UiTextId::WaypointLine),
                     config.navigation.waypoint,
-                    dpiScale);
+                    dpiScale
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+                    , gpsRouteStatuses[NavigationLineKindIndex(NavigationLineKind::Waypoint)]
+#else
+                    , nullptr
+#endif
+                    );
                 saveRequested |= DrawNavigationLineOptions(
                     UiText(UiTextId::MainProgression),
                     UiText(UiTextId::MainProgressionLine),
                     config.navigation.progression,
-                    dpiScale);
+                    dpiScale
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+                    , gpsRouteStatuses[NavigationLineKindIndex(NavigationLineKind::Progression)]
+#else
+                    , nullptr
+#endif
+                    );
                 saveRequested |= DrawNavigationLineOptions(
                     UiText(UiTextId::QuestTargets),
                     UiText(UiTextId::QuestTargetLine),
                     config.navigation.quests,
-                    dpiScale);
+                    dpiScale
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+                    , gpsRouteStatuses[NavigationLineKindIndex(NavigationLineKind::Quest)]
+#else
+                    , nullptr
+#endif
+                    );
                 saveRequested |= DrawCustomLevelLineOptions(
                     config.navigation.customLevels,
-                    dpiScale);
+                    dpiScale
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+                    , gpsRouteStatuses[NavigationLineKindIndex(NavigationLineKind::CustomLevel)]
+#else
+                    , nullptr
+#endif
+                    );
             }
         }
     }

@@ -1,6 +1,7 @@
 #include "mapsense_data_catalog.hpp"
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/localization.hpp>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +30,7 @@ constexpr std::size_t HardMaximumLocalizedBytes = 65'536U;
 constexpr std::size_t HardMaximumDiagnostics = 512U;
 constexpr std::size_t MaximumDiagnosticMessageBytes = 1'024U;
 constexpr std::size_t MaximumAtlasAssetFingerprintEntries = 65'536U;
+constexpr std::size_t MaximumAtlasExcelDirectories = 8U;
 
 const std::array<std::filesystem::path, 7U> AtlasTableNames{{
     L"levels.txt",
@@ -387,6 +389,29 @@ void AppendUniquePath(
         return;
     }
     paths.push_back(candidate.lexically_normal());
+}
+
+[[nodiscard]] auto AppendUsableAtlasExcelDirectory(
+        std::vector<std::filesystem::path>& paths,
+        const std::filesystem::path& candidate) -> bool {
+    if (paths.size() >= MaximumAtlasExcelDirectories || candidate.empty()) {
+        return false;
+    }
+    std::error_code directoryError;
+    if (!std::filesystem::is_directory(candidate, directoryError)
+        || directoryError) {
+        return true;
+    }
+    const bool hasAtlasTable = std::any_of(
+        AtlasTableNames.begin(), AtlasTableNames.end(),
+        [&candidate](const auto& name) {
+            std::error_code fileError;
+            return std::filesystem::is_regular_file(
+                       candidate / name, fileError)
+                && !fileError;
+        });
+    if (hasAtlasTable) AppendUniquePath(paths, candidate);
+    return true;
 }
 
 [[nodiscard]] auto ContextHasField(
@@ -1083,7 +1108,7 @@ class LocalizationCache final {
 public:
     LocalizationCache(
             const D2RL::PluginContext* context,
-            const D2RL::LocalizationServiceV1* service,
+            RuffnecKk::Localization::Service service,
             std::size_t maximumBytes) noexcept
         : context_(context), service_(service), maximumBytes_(maximumBytes) {}
 
@@ -1151,20 +1176,25 @@ private:
     [[nodiscard]] auto QueryService(std::string_view key) const
             -> CachedLocalization {
         CachedLocalization result{.utf8 = std::string(key)};
-        if (service_ == nullptr || service_->getStringByKey == nullptr) {
+        if (!service_) {
             return result;
         }
+        std::string v2Key(result.utf8);
+        if (v2Key.find(':') == std::string::npos) {
+            v2Key.insert(0U, "d2r:");
+        }
         std::uint32_t required{};
-        const auto first = service_->getStringByKey(
-            context_, result.utf8.c_str(), nullptr, 0U, &required);
+        const auto first = service_.GetStringByKey(
+            context_, result.utf8.c_str(), v2Key.c_str(),
+            nullptr, 0U, &required);
         if (first != D2RL::Localization::Result::BufferTooSmall
             || required <= 1U || required > maximumBytes_) {
             return result;
         }
         std::vector<char> buffer(required, '\0');
         std::uint32_t returned = required;
-        const auto second = service_->getStringByKey(
-            context_, result.utf8.c_str(), buffer.data(),
+        const auto second = service_.GetStringByKey(
+            context_, result.utf8.c_str(), v2Key.c_str(), buffer.data(),
             static_cast<std::uint32_t>(buffer.size()), &returned);
         if (second != D2RL::Localization::Result::Success
             || returned <= 1U || returned > buffer.size()
@@ -1176,7 +1206,14 @@ private:
             || !Utf8Valid(localized)) {
             return result;
         }
-        result.utf8.assign(localized);
+        if (service_.Version() == 2U && localized == v2Key
+            && v2Key != result.utf8) {
+            // V2 may echo the qualified technical key while D2R's current
+            // language table is not ready. Keep the legacy key shape used by
+            // the existing readiness guard.
+        } else {
+            result.utf8.assign(localized);
+        }
         result.serviceResolved = true;
         return result;
     }
@@ -1195,7 +1232,7 @@ private:
     }
 
     const D2RL::PluginContext* context_{};
-    const D2RL::LocalizationServiceV1* service_{};
+    RuffnecKk::Localization::Service service_{};
     std::size_t maximumBytes_{};
     bool hasVerifiedPlayerFacingLocalization_{};
     std::map<std::string, CachedLocalization, std::less<>> cache_{};
@@ -1245,6 +1282,7 @@ struct MapSenseDataCatalog::Impl final {
     bool hasVerifiedPlayerFacingLocalization{};
     std::vector<std::filesystem::path> activeExcelDirectories{};
     std::vector<std::filesystem::path> activeTileDirectories{};
+    std::vector<std::filesystem::path> atlasExcelDirectories{};
     std::uint64_t atlasDataFingerprint{};
 
     std::vector<DataCatalogLevel> levels{};
@@ -1868,27 +1906,21 @@ auto MapSenseDataCatalog::Load(
             return result;
         }
 
-        const D2RL::LocalizationServiceV1* localizationService{};
-        if (context->QueryService(
-                D2RL::ServiceId::Localization,
-                D2RL::LocalizationServiceV1Version,
-                &localizationService) != D2RL::ServiceQueryResult::Success
-            || !D2RL::HasLocalizationServiceV1Field(
-                localizationService,
-                D2RL::LocalizationServiceV1RequiredSize)) {
-            localizationService = nullptr;
+        RuffnecKk::Localization::Service localizationService;
+        if (!localizationService.Bind(context)) {
+            localizationService.Reset();
             diagnostics.Add(
                 DataCatalogDiagnosticSeverity::Warning,
                 DataCatalogFamily::Levels,
                 "localization_unavailable",
-                "LocalizationServiceV1 is unavailable; raw TXT keys are "
+                "Localization service is unavailable; raw TXT keys are "
                 "cached but localized labels remain marked unresolved.");
         }
         LocalizationCache localization(
             context, localizationService, limits.maximumLocalizedBytes);
 
         auto impl = std::make_shared<Impl>();
-        impl->hasLocalizationService = localizationService != nullptr;
+        impl->hasLocalizationService = static_cast<bool>(localizationService);
         for (std::size_t index = 0U; index < FamilyCount; ++index) {
             impl->statuses[index].family =
                 static_cast<DataCatalogFamily>(index);
@@ -1903,8 +1935,29 @@ auto MapSenseDataCatalog::Load(
                     impl->activeTileDirectories,
                     excel.parent_path() / L"tiles");
             }
+            if (!directories.active.empty()) {
+                bool atlasRootsComplete = true;
+                for (const auto& excel : directories.active) {
+                    atlasRootsComplete = AppendUsableAtlasExcelDirectory(
+                        impl->atlasExcelDirectories, excel)
+                        && atlasRootsComplete;
+                }
+                for (const auto& excel : directories.vanilla) {
+                    atlasRootsComplete = AppendUsableAtlasExcelDirectory(
+                        impl->atlasExcelDirectories, excel)
+                        && atlasRootsComplete;
+                }
+                if (!atlasRootsComplete) {
+                    diagnostics.Add(
+                        DataCatalogDiagnosticSeverity::Warning,
+                        DataCatalogFamily::Levels,
+                        "atlas_data_roots_truncated",
+                        "MapSense limited the external atlas helper to its "
+                        "first eight existing TXT source directories.");
+                }
+            }
             impl->atlasDataFingerprint = BuildAtlasDataFingerprint(
-                impl->activeExcelDirectories,
+                impl->atlasExcelDirectories,
                 impl->activeTileDirectories,
                 limits.maximumTableBytes);
         }
@@ -2196,6 +2249,14 @@ auto MapSenseDataCatalog::ActiveTileDirectories() const noexcept
     return impl_
         ? std::span<const std::filesystem::path>{
             impl_->activeTileDirectories}
+        : std::span<const std::filesystem::path>{};
+}
+
+auto MapSenseDataCatalog::AtlasExcelDirectories() const noexcept
+        -> std::span<const std::filesystem::path> {
+    return impl_
+        ? std::span<const std::filesystem::path>{
+            impl_->atlasExcelDirectories}
         : std::span<const std::filesystem::path>{};
 }
 

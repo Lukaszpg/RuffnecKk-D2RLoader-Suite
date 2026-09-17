@@ -5,6 +5,11 @@
 
 #include "d3d12_imgui_host.hpp"
 #include "external_label_provider.hpp"
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+#include "gps_route_coordinator.hpp"
+#include "gps_route_readiness.hpp"
+#endif
 #include "imgui_settings_panel.hpp"
 #include "mapsense_config.hpp"
 #include "mapsense_data_catalog.hpp"
@@ -103,6 +108,258 @@ std::atomic_uint64_t LastNativeUiPanelRefreshRequestTick{};
 std::atomic_bool NativeUiPanelRefreshQueued{};
 std::atomic_uint64_t LastNativeUiDiagnosticSnapshot{~std::uint64_t{0}};
 std::vector<NavigationLineSnapshot> NavigationLineSnapshots;
+
+[[nodiscard]] auto NavigationLinePolicyFromSettings() noexcept
+        -> std::array<NavigationLinePolicy, NavigationLineKindCount> {
+    return {{
+        {Settings.navigation.waypoint.enabled, Settings.navigation.waypoint.lineMode},
+        {Settings.navigation.progression.enabled, Settings.navigation.progression.lineMode},
+        {Settings.navigation.customLevels.enabled, Settings.navigation.customLevels.lineMode},
+        {Settings.navigation.quests.enabled, Settings.navigation.quests.lineMode},
+    }};
+}
+
+[[nodiscard]] auto NavigationPolicyHasGps(
+        const NavigationLinePolicySnapshot& policy) noexcept -> bool {
+    return std::any_of(policy.families.begin(), policy.families.end(),
+        [](const NavigationLinePolicy& family) noexcept {
+            return family.enabled && (family.mode == NavigationLineMode::GpsWalk
+                || family.mode == NavigationLineMode::GpsTeleport);
+        });
+}
+
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+enum class GpsRouteDiagnosticStatus : std::uint8_t {
+    Off,
+    Unavailable,
+    WaitingForDestination,
+    Calculating,
+    NoRoute,
+    RouteReady,
+};
+
+std::atomic_bool GpsRouteProviderAvailable{};
+std::array<std::atomic<GpsRouteDiagnosticStatus>, NavigationLineKindCount>
+    GpsRouteDiagnosticsStatus{};
+std::vector<NavigationGpsRouteSegmentSnapshot> NavigationGpsRouteSnapshots;
+std::atomic<std::uint64_t> LastGpsDrawDiagnosticSignature{};
+std::atomic<std::uint64_t> LastGpsSelectionDiagnosticSignature{};
+std::atomic<std::uint64_t> LastGpsProviderDiagnosticSignature{};
+
+[[nodiscard]] constexpr auto MixGpsDiagnosticSignature(
+        std::uint64_t signature,
+        std::uint64_t value) noexcept -> std::uint64_t {
+    return (signature ^ value) * UINT64_C(1099511628211);
+}
+
+// Separate transition streams prevent pre/post readiness from alternating every
+// frame. Suppressed changes remain eligible for the next observation.
+void LogGpsReadinessMessage(std::size_t stream, const char* detail) noexcept {
+    static std::array<std::atomic_uint64_t, 3> signatures{};
+    static std::array<std::atomic_uint64_t, 3> ticks{};
+    if (Context == nullptr || stream >= signatures.size()) return;
+    std::uint64_t signature = UINT64_C(14695981039346656037);
+    for (const char* cursor = detail; *cursor != '\0'; ++cursor) {
+        signature = MixGpsDiagnosticSignature(signature,
+            static_cast<unsigned char>(*cursor));
+    }
+    const auto native = GetNativeNavigationObservationCounters();
+    // First sightings of each native outcome are transitions too. Raw totals
+    // stay out of the signature so successful passes cannot flood the log.
+    for (const auto count : {native.localPlayerPasses, native.deadPlayerPasses,
+            native.observationAttempts, native.missingDependencies,
+            native.levelReadFailures, native.viewportFailures,
+            native.coordinatedPasses, native.faults}) {
+        signature = MixGpsDiagnosticSignature(signature, count != 0U ? 1U : 0U);
+    }
+    if (signatures[stream].load(std::memory_order_relaxed) == signature) return;
+    const auto now = GetTickCount64();
+    auto previous = ticks[stream].load(std::memory_order_relaxed);
+    if (previous != 0U && now - previous < 1'000U) return;
+    if (!ticks[stream].compare_exchange_strong(previous, now,
+            std::memory_order_relaxed)) return;
+    signatures[stream].store(signature, std::memory_order_relaxed);
+    char message[1'536]{};
+    std::snprintf(message, sizeof(message),
+        "[GPS-readiness] %s native-process-totals: local=%llu dead=%llu attempts=%llu missing-dependencies=%llu level-failures=%llu viewport-failures=%llu coordinated=%llu faults=%llu.",
+        detail,
+        static_cast<unsigned long long>(native.localPlayerPasses),
+        static_cast<unsigned long long>(native.deadPlayerPasses),
+        static_cast<unsigned long long>(native.observationAttempts),
+        static_cast<unsigned long long>(native.missingDependencies),
+        static_cast<unsigned long long>(native.levelReadFailures),
+        static_cast<unsigned long long>(native.viewportFailures),
+        static_cast<unsigned long long>(native.coordinatedPasses),
+        static_cast<unsigned long long>(native.faults));
+    Context->LogInfo(message);
+}
+
+void LogGpsRefreshReadiness(std::uint64_t session, std::int32_t level,
+        NavigationRefreshResult result) noexcept {
+    if (!NavigationPolicyHasGps(AcquireNavigationLinePolicySnapshot())) return;
+    const auto state = GetNavigationEngineStatus();
+    char detail[512]{};
+    std::snprintf(detail, sizeof(detail),
+        "phase=destination-refresh expected-session=%llu expected-level=%d result=%u engine-session=%llu engine-level=%d destination-revision=%llu destinations=%llu",
+        static_cast<unsigned long long>(session), level,
+        static_cast<unsigned>(result),
+        static_cast<unsigned long long>(state.sessionGeneration), state.levelId,
+        static_cast<unsigned long long>(state.destinationRevision),
+        static_cast<unsigned long long>(state.destinationCount));
+    LogGpsReadinessMessage(2U, detail);
+}
+
+void LogGpsDrawDiagnostic(
+        std::size_t acquiredSegments,
+        std::size_t eligibleSegments,
+        std::size_t drawnSegments) noexcept {
+    std::uint64_t signature = UINT64_C(14695981039346656037);
+    signature = MixGpsDiagnosticSignature(signature, acquiredSegments);
+    signature = MixGpsDiagnosticSignature(signature, eligibleSegments);
+    signature = MixGpsDiagnosticSignature(signature, drawnSegments);
+    if (LastGpsDrawDiagnosticSignature.exchange(
+            signature, std::memory_order_acq_rel) == signature
+        || Context == nullptr) {
+        return;
+    }
+    char message[256]{};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "MapSense GPS pipeline: projected-segments=%llu eligible-segments=%llu drawn-segments=%llu.",
+        static_cast<unsigned long long>(acquiredSegments),
+        static_cast<unsigned long long>(eligibleSegments),
+        static_cast<unsigned long long>(drawnSegments));
+    Context->LogInfo(message);
+}
+
+void LogGpsSelectionDiagnostic(
+        const NavigationGpsRouteSourceSnapshot& source,
+        std::size_t selectedCount) noexcept {
+    std::uint64_t signature = UINT64_C(14695981039346656037);
+    signature = MixGpsDiagnosticSignature(signature, source.sessionGeneration);
+    signature = MixGpsDiagnosticSignature(signature, source.destinationRevision);
+    signature = MixGpsDiagnosticSignature(signature, source.policy.revision);
+    signature = MixGpsDiagnosticSignature(signature, source.destinations.size());
+    signature = MixGpsDiagnosticSignature(signature, selectedCount);
+    if (LastGpsSelectionDiagnosticSignature.exchange(
+            signature, std::memory_order_acq_rel) == signature
+        || Context == nullptr) {
+        return;
+    }
+    char message[320]{};
+    std::snprintf(message, sizeof(message),
+        "MapSense GPS pipeline: source level=%d destinations=%llu selected=%llu player=(%d,%d) destination-revision=%llu policy-revision=%llu.",
+        source.levelId,
+        static_cast<unsigned long long>(source.destinations.size()),
+        static_cast<unsigned long long>(selectedCount),
+        source.player.subtileX,
+        source.player.subtileY,
+        static_cast<unsigned long long>(source.destinationRevision),
+        static_cast<unsigned long long>(source.policy.revision));
+    Context->LogInfo(message);
+}
+
+void LogGpsProviderDiagnostic(
+        bool submitted,
+        bool acquired,
+        std::size_t acquiredPaths,
+        std::size_t matchedPaths) noexcept {
+    std::uint64_t signature = UINT64_C(14695981039346656037);
+    signature = MixGpsDiagnosticSignature(signature, submitted ? 1U : 0U);
+    signature = MixGpsDiagnosticSignature(signature, acquired ? 1U : 0U);
+    signature = MixGpsDiagnosticSignature(signature, acquiredPaths);
+    signature = MixGpsDiagnosticSignature(signature, matchedPaths);
+    if (LastGpsProviderDiagnosticSignature.exchange(
+            signature, std::memory_order_acq_rel) == signature
+        || Context == nullptr) {
+        return;
+    }
+    char message[256]{};
+    std::snprintf(message, sizeof(message),
+        "MapSense GPS pipeline: submitted=%s acquired=%s provider-paths=%llu matched-paths=%llu.",
+        submitted ? "yes" : "no",
+        acquired ? "yes" : "no",
+        static_cast<unsigned long long>(acquiredPaths),
+        static_cast<unsigned long long>(matchedPaths));
+    Context->LogInfo(message);
+}
+
+void SetGpsRouteDiagnosticStatus(
+        const NavigationLinePolicySnapshot& policy,
+        GpsRouteDiagnosticStatus status) noexcept {
+    for (std::size_t index = 0U; index < policy.families.size(); ++index) {
+        const auto& family = policy.families[index];
+        GpsRouteDiagnosticsStatus[index].store(
+            family.enabled && (family.mode == NavigationLineMode::GpsWalk
+                    || family.mode == NavigationLineMode::GpsTeleport)
+                ? status : GpsRouteDiagnosticStatus::Off,
+            std::memory_order_release);
+    }
+}
+
+void SetGpsRouteDiagnosticStatusForRequests(
+        const NavigationLinePolicySnapshot& policy,
+        std::size_t selectedCount,
+        std::span<const GpsRouteProviderStatus> providerStatuses) noexcept {
+    SetGpsRouteDiagnosticStatus(
+        policy, GpsRouteDiagnosticStatus::WaitingForDestination);
+    if (selectedCount == 0U) return;
+    for (std::size_t family = 0U;
+            family < GpsRouteDiagnosticsStatus.size()
+                && family < providerStatuses.size(); ++family) {
+        const auto& linePolicy = policy.families[family];
+        if (!linePolicy.enabled
+            || (linePolicy.mode != NavigationLineMode::GpsWalk
+                && linePolicy.mode != NavigationLineMode::GpsTeleport)) continue;
+        auto status = GpsRouteDiagnosticStatus::Unavailable;
+        switch (providerStatuses[family]) {
+            case GpsRouteProviderStatus::Unavailable:
+                status = GpsRouteDiagnosticStatus::Unavailable;
+                break;
+            case GpsRouteProviderStatus::Calculating:
+                status = GpsRouteDiagnosticStatus::Calculating;
+                break;
+            case GpsRouteProviderStatus::NoRoute:
+                status = GpsRouteDiagnosticStatus::NoRoute;
+                break;
+            case GpsRouteProviderStatus::RouteReady:
+                status = GpsRouteDiagnosticStatus::RouteReady;
+                break;
+        }
+        GpsRouteDiagnosticsStatus[family].store(status, std::memory_order_release);
+    }
+}
+
+[[nodiscard]] auto GpsRouteDiagnosticStatusText(
+        GpsRouteDiagnosticStatus status) noexcept -> const char* {
+    switch (status) {
+        case GpsRouteDiagnosticStatus::Off: return nullptr;
+        case GpsRouteDiagnosticStatus::Unavailable:
+            return UiText(UiTextId::GpsUnavailable);
+        case GpsRouteDiagnosticStatus::WaitingForDestination:
+            return UiText(UiTextId::GpsWaitingForDestination);
+        case GpsRouteDiagnosticStatus::Calculating:
+            return UiText(UiTextId::GpsCalculating);
+        case GpsRouteDiagnosticStatus::NoRoute:
+            return UiText(UiTextId::GpsNoRoute);
+        case GpsRouteDiagnosticStatus::RouteReady:
+            return UiText(UiTextId::GpsRouteReady);
+    }
+    return nullptr;
+}
+
+[[nodiscard]] auto GpsRouteDiagnosticStatusTexts() noexcept
+        -> std::array<const char*, NavigationLineKindCount> {
+    std::array<const char*, NavigationLineKindCount> texts{};
+    for (std::size_t index = 0U; index < texts.size(); ++index) {
+        texts[index] = GpsRouteDiagnosticStatusText(
+            GpsRouteDiagnosticsStatus[index].load(std::memory_order_acquire));
+    }
+    return texts;
+}
+#endif
 std::vector<NativeAutomapMarkerSnapshot> MarkerSnapshots;
 std::vector<NativeAutomapMissileSnapshot> MissileSnapshots;
 std::vector<NativeAutomapPoiSnapshot> PoiSnapshots;
@@ -865,6 +1122,10 @@ auto RequestNavigationRefresh(
         sessionGeneration,
         levelId,
         Settings.navigation.customLevels.targets);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    LogGpsRefreshReadiness(sessionGeneration, levelId, navigationResult);
+#endif
     auto result = navigationResult;
     auto labelResult = NavigationRefreshResult::Complete;
     if (refreshRevealedActPoiDefinitions) {
@@ -936,6 +1197,10 @@ void __cdecl RetryNavigationOnUi(
         attempt.sessionGeneration,
         attempt.levelId,
         Settings.navigation.customLevels.targets);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    LogGpsRefreshReadiness(attempt.sessionGeneration, attempt.levelId, navigationResult);
+#endif
     auto result = navigationResult;
     auto labelResult = NavigationRefreshResult::Complete;
     if (attempt.refreshRevealedActPoiDefinitions) {
@@ -1024,10 +1289,15 @@ void ScheduleNativeAtlasPump(
     std::uint32_t delayMilliseconds) noexcept;
 void CompleteNativeAtlasLayerRevealIntent(
     const ClientLevelView& current) noexcept;
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+void PumpGpsRouteCoordinator(NativeAutomapObservationPhase phase) noexcept;
+#endif
 
 void OnNativeAutomapLevelObserved(
         std::int32_t currentLevelId,
         bool levelChanged,
+        NativeAutomapObservationPhase phase,
         void*) noexcept {
     if (!Operational.load(std::memory_order_acquire)
         || !FeaturesEnabled.load(std::memory_order_acquire)
@@ -1038,6 +1308,11 @@ void OnNativeAutomapLevelObserved(
     const auto sessionGeneration = CurrentSessionGeneration.load(
         std::memory_order_acquire);
     if (sessionGeneration == 0U) return;
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    PumpGpsRouteCoordinator(phase);
+#endif
+    if (phase == NativeAutomapObservationPhase::BeforeProjection) return;
     if (IsRevealAllArmed()) {
         const auto observed = ObserveNativeAutomapAtlasPublication(
             sessionGeneration,
@@ -2513,6 +2788,12 @@ auto ExecuteTrackedRevealAction(Action action) noexcept -> RevealOutcome {
     const auto currentAct = ResolveActiveLevelAct(current.levelId);
     const auto primaryStartedAt = GetTickCount64();
     const auto outcome = ExecuteAction(action);
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+    if (action == Action::ToggleRevealAll
+        && outcome == RevealOutcome::Armed) {
+        CaptureGpsCollisionDiagnosticForRevealMap();
+    }
+#endif
     const auto primaryElapsed = GetTickCount64() - primaryStartedAt;
     bool remembered{true};
     bool startPassiveNames{};
@@ -2661,6 +2942,10 @@ void __cdecl OnGameplayEvent(
             std::memory_order_release);
         CancelPendingNavigationRefresh();
         ResetNavigationSession(event->sessionGeneration);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        ResetGpsRouteCoordinator(event->sessionGeneration);
+#endif
         ResetNativeAutomapMarker();
         ResetExternalLabelProviderSession(event->sessionGeneration);
         ResetNativeAutomapPoiSession(event->sessionGeneration);
@@ -2690,6 +2975,13 @@ void __cdecl OnGameplayEvent(
             std::memory_order_release);
         SetD3D12ImGuiMenuOpen(true);
         SetRevealReplayPlayerReady(event->sessionGeneration);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        if (!QueueAction(Action::ArmRevealAll) && Context != nullptr) {
+            Context->LogWarn(
+                "MapSense GPS pipeline: private diagnostic auto-reveal could not be queued.");
+        }
+#endif
         if (!RequestRememberedRevealForCurrentSession(
                 UnknownRevealLevelId,
                 RevealReplayInitialDelayMilliseconds,
@@ -2713,6 +3005,10 @@ void __cdecl OnGameplayEvent(
         LastNativeUiPanelRefreshRequestTick.store(0U, std::memory_order_release);
         CancelPendingNavigationRefresh();
         ResetNavigationSession(event->sessionGeneration);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        ResetGpsRouteCoordinator(0U);
+#endif
         ResetNativeAutomapMarker();
         ResetExternalLabelProviderSession(0U);
         ResetNativeAutomapPoiSession(0U);
@@ -2729,6 +3025,10 @@ void __cdecl OnGameplayEvent(
         ResetRevealSession();
     } else if (event->kind == D2RL::Lifecycle::GameplayEventKind::ActChanged) {
         CancelProgressiveReveal();
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        ResetGpsRouteCoordinator(event->sessionGeneration);
+#endif
         ResetNativeAutomapMarker();
         ResetExternalLabelProviderSession(event->sessionGeneration);
         ResetNativeAutomapPoiSession(event->sessionGeneration);
@@ -2766,6 +3066,10 @@ void __cdecl OnGameplayEvent(
         ResetNavigationLevel(
             event->sessionGeneration,
             event->currentValue);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        ResetGpsRouteCoordinator(event->sessionGeneration);
+#endif
         ResetNativeAutomapMarker();
         ResetNativeAutomapPoiLevel(
             event->sessionGeneration,
@@ -2795,8 +3099,9 @@ void WriteStatus(const D2RL::PluginContext* context) noexcept {
     std::snprintf(
         message,
         sizeof(message),
-            "RuffnecKk MapSense 1.0.2: active=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
+            "RuffnecKk MapSense 2.0.0: active=%s; reveal-map-provider=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
         IsRevealEngineActive() ? "true" : "false",
+        IsExternalLabelProviderActive() ? "ready" : "unavailable",
         GameplayReady.load(std::memory_order_acquire) ? "ready" : "inactive",
         IsRevealAllArmed() ? "armed" : "off",
         MarkerAvailable.load(std::memory_order_acquire)
@@ -3205,6 +3510,15 @@ auto RegisterInputActions() noexcept -> bool {
     };
 
     for (std::size_t index = 0; index < definitions.size(); ++index) {
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        // The private GPS diagnostic build gives the runner a deterministic
+        // reveal control. Public builds keep both actions unbound by default.
+        const auto diagnosticPrimary = index == 0U
+            ? D2RL::Input::Key::F11 : D2RL::Input::Key::None;
+#else
+        constexpr auto diagnosticPrimary = D2RL::Input::Key::None;
+#endif
         const D2RL::Input::ActionRegistration registration{
             .structSize = D2RL::Input::ActionRegistrationSize,
             .flags = 0,
@@ -3212,7 +3526,7 @@ auto RegisterInputActions() noexcept -> bool {
             .displayName = definitions[index].displayName,
             .category = "RuffnecKk Suite",
             .defaultPrimary = {
-                .key = D2RL::Input::Key::None,
+                .key = diagnosticPrimary,
                 .modifier = D2RL::Input::Modifier::None,
             },
             .defaultSecondary = {
@@ -3439,31 +3753,37 @@ auto DrawMapSensePanel(bool* open, float menuScale, void*) noexcept
         -> D3D12ImGuiPanelBounds {
     if (open == nullptr || !*open) return {};
     const auto gameplayReady = GameplayReady.load(std::memory_order_acquire);
-    if (!ShouldDrawMapSenseSettingsMenu(
-            gameplayReady,
-            false)) {
+    if (!ShouldDrawMapSenseSettingsMenu(gameplayReady, false)) {
         *open = false;
         return {};
     }
     auto expanded = MenuExpanded.load(std::memory_order_acquire);
-    const auto featuresBefore = FeaturesEnabled.load(
-        std::memory_order_acquire);
+    const auto featuresBefore = FeaturesEnabled.load(std::memory_order_acquire);
     const auto bounds = DrawImGuiSettingsPanel(
-        Settings,
-        expanded,
-        IsRevealAllArmed(),
-        menuScale,
-        OnImGuiSettingsAction);
+        Settings, expanded, IsRevealAllArmed(), menuScale, OnImGuiSettingsAction
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        , GpsRouteDiagnosticStatusTexts()
+#endif
+        );
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    if (PublishNavigationLinePolicy(NavigationLinePolicyFromSettings())) {
+        const auto policy = AcquireNavigationLinePolicySnapshot();
+        ResetGpsRouteCoordinator(CurrentSessionGeneration.load(
+            std::memory_order_acquire));
+        SetGpsRouteDiagnosticStatus(policy, GpsRouteDiagnosticStatus::WaitingForDestination);
+    }
+#else
+    (void)PublishNavigationLinePolicy(NavigationLinePolicyFromSettings());
+#endif
     if (featuresBefore != Settings.enabled) {
         ApplyMapSenseFeatureState(Settings.enabled);
     } else {
         SetNativeAutomapMarkerEnabled(featuresBefore);
-        SetNativeAutomapMissileEnabled(
-            featuresBefore && Settings.missiles.enabled);
-        SetNativeAutomapImmunityCollectionEnabled(
-            featuresBefore
-                && Settings.monsters.enabled
-                && Settings.immunities.enabled);
+        SetNativeAutomapMissileEnabled(featuresBefore && Settings.missiles.enabled);
+        SetNativeAutomapImmunityCollectionEnabled(featuresBefore
+            && Settings.monsters.enabled && Settings.immunities.enabled);
         ApplyNativeAutomapPoiCollectionSettings();
     }
     MenuExpanded.store(expanded, std::memory_order_release);
@@ -3479,7 +3799,14 @@ auto DrawMapSensePanel(bool* open, float menuScale, void*) noexcept
 
 void LogNativeUiDiagnosticTransition(
         const NativeUiStateStatus& status) noexcept {
-    if (!Settings.diagnostics || Context == nullptr) {
+    constexpr bool gpsDiagnostics =
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        true;
+#else
+        false;
+#endif
+    if ((!Settings.diagnostics && !gpsDiagnostics) || Context == nullptr) {
         LastNativeUiDiagnosticSnapshot.store(
             ~std::uint64_t{0}, std::memory_order_release);
         return;
@@ -3530,12 +3857,109 @@ void LogNativeUiDiagnosticTransition(
     Context->LogInfo(message);
 }
 
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+void PumpGpsRouteCoordinator(NativeAutomapObservationPhase phase) noexcept {
+    const auto policy = AcquireNavigationLinePolicySnapshot();
+    if (!NavigationPolicyHasGps(policy)) {
+        SetGpsRouteDiagnosticStatus(policy, GpsRouteDiagnosticStatus::Off);
+        InvalidateNavigationGpsRoutes();
+        return;
+    }
+    if (!GpsRouteProviderAvailable.load(std::memory_order_acquire)) {
+        SetGpsRouteDiagnosticStatus(policy, GpsRouteDiagnosticStatus::Unavailable);
+        InvalidateNavigationGpsRoutes();
+        return;
+    }
+    NavigationGpsRouteSourceSnapshot source{};
+    const auto geometry = AcquireExternalAtlasGeometrySnapshot();
+    const auto catalog = DataCatalog.load(std::memory_order_acquire);
+    NavigationGpsSourceDiagnostics diagnostics{};
+    const auto acquired = AcquireNavigationGpsRouteSourceSnapshot(source, &diagnostics);
+    const GpsRouteReadinessInput readinessInput{
+        .sourceReadiness = diagnostics.readiness,
+        .hasGeometry = geometry != nullptr,
+        .hasGeometryPayload = geometry != nullptr && geometry->geometry != nullptr,
+        .hasCatalog = catalog != nullptr,
+        .sourceSession = source.sessionGeneration,
+        .currentSession = CurrentSessionGeneration.load(std::memory_order_acquire),
+        .sourcePolicy = source.policy.revision,
+        .currentPolicy = policy.revision,
+        .geometrySession = geometry != nullptr ? geometry->sessionGeneration : 0U,
+        .geometryDigest = geometry != nullptr && geometry->geometry != nullptr
+            ? geometry->geometry->digest : 0U,
+        .sourceLevel = source.levelId,
+        .geometryLevel = geometry != nullptr ? geometry->currentLevelId : 0,
+        .geometryDifficulty = geometry != nullptr ? geometry->difficulty : std::uint8_t{0},
+    };
+    const auto readiness = EvaluateGpsRouteReadiness(readinessInput);
+    const bool after = phase == NativeAutomapObservationPhase::AfterObservation;
+    char detail[1'024]{};
+    std::snprintf(detail, sizeof(detail),
+        "phase=%s reason=%s source-state=%u state-available=%u engine-session=%llu engine-level=%d destination-revision=%llu destinations=%llu player=%u current-session=%llu source-policy=%llu current-policy=%llu geometry=%u payload=%u catalog=%u geometry-session=%llu geometry-level=%d seed=%u difficulty=%u digest=%llu allow-submit=%u last-observation=%s",
+        after ? "after-observation" : "before-projection", GpsRouteReadinessName(readiness),
+        static_cast<unsigned>(diagnostics.readiness), static_cast<unsigned>(diagnostics.stateAvailable),
+        static_cast<unsigned long long>(diagnostics.sessionGeneration), diagnostics.levelId,
+        static_cast<unsigned long long>(diagnostics.destinationRevision),
+        static_cast<unsigned long long>(diagnostics.destinationCount), static_cast<unsigned>(diagnostics.hasPlayer),
+        static_cast<unsigned long long>(readinessInput.currentSession),
+        static_cast<unsigned long long>(readinessInput.sourcePolicy),
+        static_cast<unsigned long long>(readinessInput.currentPolicy),
+        static_cast<unsigned>(readinessInput.hasGeometry), static_cast<unsigned>(readinessInput.hasGeometryPayload),
+        static_cast<unsigned>(readinessInput.hasCatalog),
+        static_cast<unsigned long long>(readinessInput.geometrySession), readinessInput.geometryLevel,
+        geometry != nullptr ? geometry->seed : 0U, static_cast<unsigned>(readinessInput.geometryDifficulty),
+        static_cast<unsigned long long>(readinessInput.geometryDigest), static_cast<unsigned>(after),
+        NavigationAutomapObservationReasonName(GetNavigationAutomapObservationReason()));
+    LogGpsReadinessMessage(after ? 1U : 0U, detail);
+    if (!acquired || readiness != GpsRouteReadiness::Ready) {
+        SetGpsRouteDiagnosticStatus(policy, GpsRouteDiagnosticStatus::WaitingForDestination);
+        InvalidateNavigationGpsRoutes();
+        return;
+    }
+    try {
+        GpsRouteCoordinatorInput input{
+            .source = source,
+            .seed = geometry->seed,
+            .difficulty = geometry->difficulty,
+            .terrainRevision = geometry->geometry->digest,
+            .excelRoots = {catalog->AtlasExcelDirectories().begin(),
+                catalog->AtlasExcelDirectories().end()},
+            .tileRoots = {catalog->ActiveTileDirectories().begin(),
+                catalog->ActiveTileDirectories().end()},
+            .nowMilliseconds = GetTickCount64(),
+            .allowRequestSubmission =
+                phase == NativeAutomapObservationPhase::AfterObservation,
+        };
+        GpsRouteCoordinatorResult result{};
+        const auto ticked = TickGpsRouteCoordinator(input, result);
+        LogGpsSelectionDiagnostic(source, result.selectedCount);
+        LogGpsProviderDiagnostic(result.submitted, result.acquired,
+            result.providerPathCount, result.publishedPathCount);
+        if (!ticked) {
+            SetGpsRouteDiagnosticStatus(
+                source.policy, GpsRouteDiagnosticStatus::NoRoute);
+            return;
+        }
+        SetGpsRouteDiagnosticStatusForRequests(
+            source.policy, result.selectedCount, result.statuses);
+        if (result.published) {
+            SetGpsRouteDiagnosticStatus(
+                source.policy, GpsRouteDiagnosticStatus::RouteReady);
+        }
+    } catch (...) {
+        SetGpsRouteDiagnosticStatus(policy, GpsRouteDiagnosticStatus::NoRoute);
+    }
+}
+#endif
+
 auto WantsMapSenseOwnedOverlay(void*) noexcept -> bool {
     if (!FeaturesEnabled.load(std::memory_order_acquire)) return false;
     RequestNativeUiPanelVisibilityRefresh();
     NativeUiStateStatus nativeUi{};
     if (!AcquireNativeUiStateStatus(nativeUi)) {
         InvalidateNativeAutomapLocalPlayerFrame();
+        InvalidateNavigationProjection();
         return false;
     }
     LogNativeUiDiagnosticTransition(nativeUi);
@@ -3544,13 +3968,26 @@ auto WantsMapSenseOwnedOverlay(void*) noexcept -> bool {
         // previous player witness without destroying any reveal/cache state.
         // A fresh living local-player automap pass must explicitly re-arm it.
         InvalidateNativeAutomapLocalPlayerFrame();
+        InvalidateNavigationProjection();
         return false;
     }
     const auto retainCurrentProjection = nativeUi.retainAutomapProjection;
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    const auto navigationPolicy = AcquireNavigationLinePolicySnapshot();
+    const auto gpsRouteEnabled = NavigationPolicyHasGps(navigationPolicy);
+#endif
     const auto navigationEnabled = Settings.navigation.waypoint.enabled
         || Settings.navigation.progression.enabled
         || Settings.navigation.customLevels.enabled
         || Settings.navigation.quests.enabled;
+    const auto navigationFrameWanted = navigationEnabled
+        && WantsNavigationLineFrame(retainCurrentProjection);
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    const auto gpsRouteFrameWanted = gpsRouteEnabled
+        && WantsNavigationGpsRouteFrame(retainCurrentProjection);
+#endif
     const auto gameplayReady = GameplayReady.load(std::memory_order_acquire);
     return Operational.load(std::memory_order_acquire)
         && ShouldDrawMapSenseOwnedVisualFrame(
@@ -3558,12 +3995,16 @@ auto WantsMapSenseOwnedOverlay(void*) noexcept -> bool {
             nativeUi.activeMask,
             IsNativeAutomapLocalPlayerFrameAlive())
         && ShouldDrawMapSenseOwnedMapOverlay(gameplayReady, false)
-        && ((navigationEnabled
-                && WantsNavigationLineFrame(retainCurrentProjection))
+        && (navigationFrameWanted
             || (Settings.monsters.enabled
                 && WantsNativeAutomapMarkerFrame(retainCurrentProjection))
             || WantsNativeAutomapMissileFrame()
-            || WantsNativeAutomapPoiFrame(retainCurrentProjection));
+            || WantsNativeAutomapPoiFrame(retainCurrentProjection)
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+            || gpsRouteFrameWanted
+#endif
+            );
 }
 
 auto MarkerStyleFor(MonsterRank rank) noexcept
@@ -3625,6 +4066,21 @@ auto ToImGuiColor(RgbaColor color, float globalOpacity) noexcept -> ImU32 {
     return false;
 }
 
+[[nodiscard]] auto NavigationLineModeForSettings(
+        NavigationLineKind kind) noexcept -> NavigationLineMode {
+    switch (kind) {
+        case NavigationLineKind::Waypoint:
+            return Settings.navigation.waypoint.lineMode;
+        case NavigationLineKind::Progression:
+            return Settings.navigation.progression.lineMode;
+        case NavigationLineKind::CustomLevel:
+            return Settings.navigation.customLevels.lineMode;
+        case NavigationLineKind::Quest:
+            return Settings.navigation.quests.lineMode;
+    }
+    return NavigationLineMode::Direct;
+}
+
 void DrawNavigationLines(
         ImDrawList* drawList,
         const ImGuiIO& io,
@@ -3635,7 +4091,9 @@ void DrawNavigationLines(
         MinimumNavigationLineThickness,
         MaximumNavigationLineThickness);
     for (const auto& line : NavigationLineSnapshots) {
-        if (!NavigationLineEnabled(line.kind)) continue;
+        if (!NavigationLineEnabled(line.kind)
+            || NavigationLineModeForSettings(line.kind)
+                != NavigationLineMode::Direct) continue;
         if (line.nativeWidth <= 0 || line.nativeHeight <= 0) continue;
         const auto scaleX = io.DisplaySize.x
             / static_cast<float>(line.nativeWidth);
@@ -3669,6 +4127,60 @@ void DrawNavigationLines(
             thickness);
     }
 }
+
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+void DrawGpsRouteLines(
+        ImDrawList* drawList,
+        const ImGuiIO& io,
+        float opacity) noexcept {
+    if (drawList == nullptr) return;
+    std::size_t eligibleSegments{};
+    std::size_t drawnSegments{};
+    const auto thickness = std::clamp(
+        Settings.navigation.lineThickness * Settings.overlay.scale,
+        MinimumNavigationLineThickness,
+        MaximumNavigationLineThickness) + 1.0F;
+    for (const auto& segment : NavigationGpsRouteSnapshots) {
+        const auto configuredMode = NavigationLineModeForSettings(segment.kind);
+        const auto expectedMode = configuredMode == NavigationLineMode::GpsTeleport
+            ? NavigationGpsRouteMode::Teleport
+            : NavigationGpsRouteMode::Walk;
+        if (!NavigationLineEnabled(segment.kind)
+            || (configuredMode != NavigationLineMode::GpsWalk
+                && configuredMode != NavigationLineMode::GpsTeleport)
+            || segment.mode != expectedMode) continue;
+        ++eligibleSegments;
+        if (segment.nativeWidth <= 0 || segment.nativeHeight <= 0) continue;
+        const auto scaleX = io.DisplaySize.x
+            / static_cast<float>(segment.nativeWidth);
+        const auto scaleY = io.DisplaySize.y
+            / static_cast<float>(segment.nativeHeight);
+        if (!std::isfinite(scaleX) || !std::isfinite(scaleY)
+            || scaleX <= 0.0F || scaleY <= 0.0F) continue;
+        const auto tolerance = std::max(0.01F, std::max(scaleX, scaleY) * 0.01F);
+        if (std::abs(scaleX - scaleY) > tolerance) continue;
+        const ImVec2 start{
+            static_cast<float>(segment.startX) * scaleX,
+            static_cast<float>(segment.startY) * scaleY,
+        };
+        const ImVec2 end{
+            static_cast<float>(segment.endX) * scaleX,
+            static_cast<float>(segment.endY) * scaleY,
+        };
+        if (!std::isfinite(start.x) || !std::isfinite(start.y)
+            || !std::isfinite(end.x) || !std::isfinite(end.y)) continue;
+        drawList->AddLine(
+            start,
+            end,
+            NavigationColorFor(segment.kind, opacity),
+            thickness);
+        ++drawnSegments;
+    }
+    LogGpsDrawDiagnostic(
+        NavigationGpsRouteSnapshots.size(), eligibleSegments, drawnSegments);
+}
+#endif
 
 void DrawClosedMarkerOutline(
         ImDrawList* drawList,
@@ -4874,8 +5386,12 @@ void DrawAutomapPoiSnapshots(
                     ToImGuiColor(Settings.objects.shrineLabels.color, opacity),
                     opacity,
                     AutomapTextPlacement::AboveIcon,
-                    labelMetrics.IconTopExtent(NativeShrineIconTopExtent),
-                    labelMetrics.Spacing(NativeShrineLabelGap));
+                    labelMetrics.IconTopExtentForViewport(
+                        NativeShrineIconTopExtent,
+                        poi.nativeViewportScale),
+                    labelMetrics.SpacingForViewport(
+                        NativeShrineLabelGap,
+                        poi.nativeViewportScale));
                 break;
             }
             case AutomapPoiKind::Chest: {
@@ -5267,9 +5783,17 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
     NativeUiStateStatus nativeUi{};
     if (!AcquireNativeUiStateStatus(nativeUi)) return;
     const auto retainCurrentProjection = nativeUi.retainAutomapProjection;
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    const auto navigationLineCount = AcquireNavigationLineSnapshots(
+        NavigationLineSnapshots, retainCurrentProjection);
+    const auto gpsRouteSegmentCount = AcquireNavigationGpsRouteSegmentSnapshots(
+        NavigationGpsRouteSnapshots, retainCurrentProjection);
+#else
     const auto navigationLineCount = AcquireNavigationLineSnapshots(
         NavigationLineSnapshots,
         retainCurrentProjection);
+#endif
     const auto markerCount = AcquireNativeAutomapMarkers(
         MarkerSnapshots,
         retainCurrentProjection);
@@ -5278,7 +5802,12 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
         PoiSnapshots,
         retainCurrentProjection);
     if (navigationLineCount == 0U && markerCount == 0U
-        && missileCount == 0U && poiCount == 0U) {
+        && missileCount == 0U && poiCount == 0U
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+        && gpsRouteSegmentCount == 0U
+#endif
+        ) {
         return;
     }
 
@@ -5290,6 +5819,7 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
     NativeAutomapClipBounds nativeClip{};
     if (!AcquireNativeAutomapViewport(viewport, retainCurrentProjection)
         || !TryResolveNativeAutomapClipBounds(viewport, nativeClip)) {
+        InvalidateNavigationProjection();
         return;
     }
     NativeUiMapHorizontalClip panelClip{};
@@ -5298,11 +5828,15 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
             viewport.nativeHeight,
             nativeUi.activeMask,
             panelClip)) {
+        InvalidateNavigationProjection();
         return;
     }
     nativeClip.left = std::max(nativeClip.left, panelClip.left);
     nativeClip.right = std::min(nativeClip.right, panelClip.right);
-    if (nativeClip.right <= nativeClip.left) return;
+    if (nativeClip.right <= nativeClip.left) {
+        InvalidateNavigationProjection();
+        return;
+    }
     const auto viewportScaleX = io.DisplaySize.x
         / static_cast<float>(viewport.nativeWidth);
     const auto viewportScaleY = io.DisplaySize.y
@@ -5315,6 +5849,7 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
         || viewportScaleX <= 0.0F || viewportScaleY <= 0.0F
         || std::abs(viewportScaleX - viewportScaleY)
             > viewportScaleTolerance) {
+        InvalidateNavigationProjection();
         return;
     }
     const ImVec2 clipMinimum{
@@ -5329,6 +5864,7 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
         || !std::isfinite(clipMaximum.x) || !std::isfinite(clipMaximum.y)
         || clipMaximum.x <= clipMinimum.x
         || clipMaximum.y <= clipMinimum.y) {
+        InvalidateNavigationProjection();
         return;
     }
     const auto opacity = std::clamp(
@@ -5352,7 +5888,13 @@ void DrawMapSenseOwnedOverlay(void*) noexcept {
     // Monster ranks are then submitted from
     // weakest to strongest so dense packs cannot bury minions, uniques,
     // superuniques, or native MonStats bosses.
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
     DrawNavigationLines(drawList, io, opacity);
+    DrawGpsRouteLines(drawList, io, opacity);
+#else
+    DrawNavigationLines(drawList, io, opacity);
+#endif
     DrawAutomapPoiSnapshots(
         drawList,
         io,
@@ -5753,9 +6295,9 @@ constexpr D2RL::PluginInfo PluginInfo{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-mapsense",
     .name = "RuffnecKk MapSense",
-    .version = "1.0.2",
+    .version = "2.0.0",
     .author = "RuffnecKk",
-    .description = "Reveals maps, marks monsters, and draws direct navigation lines.",
+    .description = "Reveals maps, marks monsters, and draws navigation guidance.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
 };
 
@@ -5907,11 +6449,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         return false;
     }
     InitializeNavigationEngine();
+    (void)PublishNavigationLinePolicy(NavigationLinePolicyFromSettings());
     if (!InitializeNavigationResolver(
             context,
             Settings.diagnostics)) {
         context->LogWarn(
-            "MapSense: Direct navigation is unavailable because its D2R runtime proofs did not validate; Reveal and monster markers remain active.");
+            "MapSense: Direct navigation is unavailable because its D2R runtime proofs did not validate; Independently validated monster markers remain active.");
     }
     const auto markerAvailable = InitializeNativeAutomapMarker(
         context,
@@ -5937,14 +6480,14 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
                 && Settings.immunities.enabled);
     } else {
         context->LogWarn(
-            "MapSense: monster markers and native navigation projection are unavailable; Reveal and the settings panel remain active.");
+            "MapSense: monster markers, native navigation projection, and Reveal Map are unavailable; the settings panel remains active.");
     }
     if (poiRuntimeAvailable) {
         context->LogInfo(
             "MapSense: localized labels and data-driven objects are pending D2R language initialization.");
     } else {
         context->LogWarn(
-            "MapSense: localized automap labels and data-driven object markers are unavailable; Reveal, navigation, and independently validated monster markers remain active.");
+            "MapSense: localized automap labels, data-driven object markers, and Reveal Map are unavailable; independently validated navigation and monster markers remain active.");
     }
     const auto nativeUiTelemetryAvailable = InitializeNativeUiState(context);
     if (!nativeUiTelemetryAvailable) {
@@ -6026,8 +6569,29 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
             nullptr);
     if (!externalLabelsAvailable) {
         context->LogWarn(
-            "MapSense: seed-scoped distant labels are unavailable; native Reveal remains active without loading distant rooms.");
+            "MapSense: Reveal Map is unavailable because its atlas provider did not initialize.");
     }
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    SetGpsRouteDiagnosticStatus(AcquireNavigationLinePolicySnapshot(),
+        GpsRouteDiagnosticStatus::Off);
+    const auto gpsRouteProviderAvailable = externalLabelsAvailable
+        && InitializeGpsRouteCoordinator(context);
+    GpsRouteProviderAvailable.store(
+        gpsRouteProviderAvailable, std::memory_order_release);
+    if (!gpsRouteProviderAvailable
+        && FallbackUnavailableGpsLineModesToDirect(Settings)) {
+        (void)PublishNavigationLinePolicy(NavigationLinePolicyFromSettings());
+        context->LogWarn(
+            "MapSense: GPS lines could not start; GPS selections use Direct lines for this session.");
+    }
+#else
+    if (FallbackUnavailableGpsLineModesToDirect(Settings)) {
+        (void)PublishNavigationLinePolicy(NavigationLinePolicyFromSettings());
+        context->LogWarn(
+            "MapSense: this build has no GPS provider; GPS selections use Direct lines for this session.");
+    }
+#endif
 
     auto registration = D2RL::MakeConsoleCommand(
         "mapsense",
@@ -6044,11 +6608,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         loadedMessage,
         sizeof(loadedMessage),
-        "RuffnecKk MapSense 1.0.2 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal/settings=active; native-panel-occlusion=%s.",
+        "RuffnecKk MapSense 2.0.0 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal-Map=%s; settings=active; native-panel-occlusion=%s.",
         poiRuntimeAvailable ? "pending-localization" : "unavailable",
         externalLabelsAvailable ? "active" : "unavailable",
         markerAvailable ? "active" : "unavailable",
         IsNavigationResolverActive() ? "active" : "unavailable",
+        externalLabelsAvailable ? "ready" : "unavailable",
         nativeUiTelemetryAvailable ? "active" : "fail-closed");
     context->LogInfo(loadedMessage);
     return true;
@@ -6072,6 +6637,13 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     SetNativeAutomapLevelObservedCallback(nullptr, nullptr);
     CancelPendingNavigationRefresh(true);
     CancelPendingRevealReplay();
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    SetGpsRouteDiagnosticStatus(AcquireNavigationLinePolicySnapshot(),
+        GpsRouteDiagnosticStatus::Off);
+    GpsRouteProviderAvailable.store(false, std::memory_order_release);
+    ShutdownGpsRouteCoordinator();
+#endif
     ShutdownExternalLabelProvider();
     ShutdownRevealReplayTimer();
     ShutdownNavigationRefreshTimer();

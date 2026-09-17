@@ -138,7 +138,7 @@ still depends on native fingerprints rather than the Steam channel or build
 number.
 
 Detailed implementation evidence and historical qualification records remain in
-`plugins/isc12/VALIDATION.md` in the source repository.
+`workspace:plugin-dev/isc12/notes/suite/VALIDATION.md` in the source repository.
 
 ## Mod release checklist
 

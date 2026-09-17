@@ -1,8 +1,12 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include "cast_triggers_policy.hpp"
+#define RUFFNECKK_CAST_VERSION "1.1.0"
 
 #include <Windows.h>
 
@@ -64,8 +68,6 @@ constexpr std::uintptr_t EventFunc15Rva = 0x584170;
 constexpr std::uintptr_t EventFunc16Rva = 0x583150;
 constexpr std::uintptr_t EventFunc20Rva = 0x583B30;
 constexpr std::uintptr_t ResolveActiveWeaponRva = 0x4242B0;
-constexpr std::uintptr_t GetWeaponMasteryChanceRva = 0x33D4F0;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
 constexpr std::uintptr_t GetSeedRva = 0x34A1E0;
 constexpr std::uintptr_t ActiveSkillLayoutWitnessRva = 0x33DBA0;
 constexpr std::size_t MaximumPlayerInputEntries = 64;
@@ -231,19 +233,6 @@ constexpr auto EventFunc20Expected = std::to_array<std::uint8_t>({
 constexpr auto ResolveActiveWeaponExpected = std::to_array<std::uint8_t>({
     0xE9,0x4B,0x6D,0xF2,0xFF,
 });
-constexpr auto GetWeaponMasteryChanceExpected = std::to_array<std::uint8_t>({
-    0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41,
-    0x57,0x48,0x81,0xEC,0x48,0x02,0x00,0x00,
-    0x48,0x8B,0x05,0xC1,0xDD,0x68,0x02,0x48,
-    0x33,0xC4,0x48,0x89,0x84,0x24,0x30,0x02,
-    0x00,0x00,
-});
-constexpr auto GetUnitStatExpected = std::to_array<std::uint8_t>({
-    0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,
-    0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x57,
-    0x48,0x83,0xEC,0x20,0x41,0x0F,0xB7,0xE8,
-    0x8B,0xFA,0x48,0x8B,0xD9,0x48,0x85,0xC9,
-});
 constexpr auto GetSeedExpected = std::to_array<std::uint8_t>({
     0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x8B,
     0xD9,0x48,0x85,0xC9,0x75,0x1D,0x88,0x4C,
@@ -290,11 +279,6 @@ using EventFunctionFn = std::int32_t(__fastcall*)(
     void*, std::int32_t, void*, void*, void*, std::int32_t, std::int32_t,
     std::int32_t, void*) noexcept;
 using ResolveActiveWeaponFn = void*(__fastcall*)(void*) noexcept;
-using GetWeaponMasteryChanceFn = std::int32_t(__fastcall*)(
-    void*, void*, std::int32_t, std::int32_t) noexcept;
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    void*, std::int32_t, std::uint16_t) noexcept;
-
 struct NativeSeedPair {
     std::uint32_t low{};
     std::uint32_t high{};
@@ -328,8 +312,9 @@ EventFunctionFn OriginalEventFunc15{};
 EventFunctionFn OriginalEventFunc16{};
 EventFunctionFn OriginalEventFunc20{};
 ResolveActiveWeaponFn ResolveActiveWeapon{};
-GetWeaponMasteryChanceFn GetWeaponMasteryChance{};
-GetUnitStatFn GetUnitStat{};
+// Governed native dependencies 0x2F5020 and 0x33D4F0 are admitted by the
+// shared stat adapter; their exact Core provider contract lives in common.
+RuffnecKk::NativeStatCompat::Adapter NativeStats;
 GetSeedFn GetSeed{};
 
 thread_local std::uint32_t CastDispatchDepth{};
@@ -787,6 +772,19 @@ bool Check(
     return false;
 }
 
+bool BindNativeStatHelpers() noexcept {
+    using RuffnecKk::NativeStatCompat::Helper;
+    using RuffnecKk::NativeStatCompat::ToMask;
+    if (NativeStats.BindCurrentProcess(
+            reinterpret_cast<std::uintptr_t>(Base),
+            ToMask(Helper::GetUnitStat) | ToMask(Helper::WeaponMastery))) {
+        return true;
+    }
+    Context->LogError(
+        "CastTriggers: the unit-stat or weapon-mastery helper has no admitted canonical/Core contract; plugin refused.");
+    return false;
+}
+
 bool ValidateNativeFingerprint() noexcept {
     return Check(SkillHandlerRva, SkillHandlerExpected, "skill handler")
         && Check(
@@ -857,11 +855,7 @@ bool ValidateNativeFingerprint() noexcept {
             ResolveActiveWeaponRva,
             ResolveActiveWeaponExpected,
             "active weapon resolver")
-        && Check(
-            GetWeaponMasteryChanceRva,
-            GetWeaponMasteryChanceExpected,
-            "weapon-mastery Critical helper")
-        && Check(GetUnitStatRva, GetUnitStatExpected, "unit stat getter")
+        && BindNativeStatHelpers()
         && Check(GetSeedRva, GetSeedExpected, "unit seed accessor")
         && Check(
             ActiveSkillLayoutWitnessRva,
@@ -890,9 +884,6 @@ void ResolveNativeFunctions() noexcept {
     GetDynamicPath = At<GetDynamicPathFn>(GetDynamicPathRva);
     GetSkillsRecord = At<GetSkillsRecordFn>(GetSkillsRecordRva);
     ResolveActiveWeapon = At<ResolveActiveWeaponFn>(ResolveActiveWeaponRva);
-    GetWeaponMasteryChance = At<GetWeaponMasteryChanceFn>(
-        GetWeaponMasteryChanceRva);
-    GetUnitStat = At<GetUnitStatFn>(GetUnitStatRva);
     GetSeed = At<GetSeedFn>(GetSeedRva);
 }
 
@@ -919,7 +910,7 @@ bool PredictNativeCriticalStrike(
         std::int32_t mode,
         CriticalPredictionProbe* probe) noexcept {
     if (probe) *probe = {};
-    if (!attacker || !damage || !GetSeed || !GetUnitStat
+    if (!attacker || !damage || !GetSeed || !NativeStats.IsBound()
             || !IsCombatTriggerEnabled(
                 Settings.combatTriggers,
                 CombatTriggerKind::CriticalStrike)) {
@@ -935,19 +926,15 @@ bool PredictNativeCriticalStrike(
     if (!nativeSeed) return false;
     auto predictedSeed = *nativeSeed;
 
-    const auto passiveChance = GetUnitStat(
+    const auto passiveChance = NativeStats.GetUnitStat(
         attacker,
         PassiveCriticalStatId,
         0);
     if (probe) probe->passiveChance = passiveChance;
 
-    if (mode == 0 && ResolveActiveWeapon && GetWeaponMasteryChance) {
+    if (mode == 0 && ResolveActiveWeapon) {
         if (void* const weapon = ResolveActiveWeapon(attacker)) {
-            const auto chance = GetWeaponMasteryChance(
-                attacker,
-                weapon,
-                0,
-                2);
+            const auto chance = NativeStats.ReadWeaponMastery(attacker, weapon);
             if (probe) probe->masteryChance = chance;
             if (chance > 0
                     && RollNativePercent(
@@ -1236,6 +1223,7 @@ void __fastcall HookDestroyDamage(void* damage) noexcept {
     }
     OriginalDestroyDamage(damage);
 }
+
 
 std::int32_t __fastcall HookEventFunc15(
         void* game,
@@ -2336,7 +2324,7 @@ auto Status(
     std::snprintf(
         summary,
         sizeof(summary),
-        "Cast Triggers 1.0.0: %s; observed=%llu; eligible=%llu; cast dispatches=%llu; fixed procs=%llu; same-level procs=%llu; native-position procs=%llu; native-unit-target procs=%llu; config=%s.",
+        "Cast Triggers " RUFFNECKK_CAST_VERSION ": %s; observed=%llu; eligible=%llu; cast dispatches=%llu; fixed procs=%llu; same-level procs=%llu; native-position procs=%llu; native-unit-target procs=%llu; config=%s.",
         Operational.load(std::memory_order_acquire) ? "active" : "disabled",
         static_cast<unsigned long long>(
             ManualCastsObserved.load(std::memory_order_relaxed)),
@@ -2527,7 +2515,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-cast-triggers",
     .name = "Cast Triggers",
-    .version = "1.0.0",
+    .version = "1.1.0",
     .author = "RuffnecKk",
     .description =
         "Triggers item skills from spells, attack attempts, and combat outcomes.",
@@ -2541,11 +2529,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept
     return &Info;
 }
 
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         const D2RL::PluginContext* context) noexcept -> bool {
     using namespace RuffnecKk::CastTriggers;
     Context = context;
     Base = context ? reinterpret_cast<std::uint8_t*>(context->exeBase) : nullptr;
+    NativeStats.Reset();
     ResetState();
     if (!Context || !Base) return false;
 
@@ -2553,7 +2543,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!LoadConfig()) return false;
     if (!Settings.enabled) {
         const auto message = std::string(
-            "Cast Triggers 1.0.0 by RuffnecKk loaded disabled; config=")
+            "Cast Triggers " RUFFNECKK_CAST_VERSION " by RuffnecKk loaded disabled; config=")
             + LoadedConfigPath + ".";
         context->LogInfo(message.c_str());
         return true;
@@ -2571,7 +2561,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
             "CastTriggers: status command could not be registered.");
     }
     const auto message = std::string(
-        "Cast Triggers 1.0.0 by RuffnecKk active; native fingerprint accepted; config=")
+        "Cast Triggers " RUFFNECKK_CAST_VERSION " by RuffnecKk active; native fingerprint accepted; config=")
         + LoadedConfigPath + "; channeling="
         + (Settings.whileChanneling.enabled
                 && HasConfiguredTriggerStat(Settings.whileChanneling.stats)
@@ -2604,4 +2594,5 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     RuffnecKk::CastTriggers::Operational.store(
         false,
         std::memory_order_release);
+    RuffnecKk::CastTriggers::NativeStats.Reset();
 }

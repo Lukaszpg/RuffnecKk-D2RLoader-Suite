@@ -3,7 +3,10 @@ add_library(ruffneckk_prevent_merc_death_in_town SHARED
     src/plugin.rc
 )
 
-target_link_libraries(ruffneckk_prevent_merc_death_in_town PRIVATE RuffnecKk::Common)
+target_link_libraries(ruffneckk_prevent_merc_death_in_town PRIVATE
+    RuffnecKk::Common
+    RuffnecKk::NativeStatCompat
+)
 target_compile_features(ruffneckk_prevent_merc_death_in_town PRIVATE cxx_std_20)
 set_target_properties(ruffneckk_prevent_merc_death_in_town PROPERTIES
     OUTPUT_NAME "d2rl-ruffneckk-prevent-merc-death-in-town"

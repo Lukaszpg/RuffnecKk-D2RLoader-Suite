@@ -152,7 +152,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-repair-costs-cap",
     .name = "Repair Costs Cap",
-    .version = "1.4.4",
+    .version = "1.4.5",
     .author = "RuffnecKk",
     .description = "Controls NPC repair prices and optional permanent durability wear.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -513,11 +513,12 @@ auto Status(
     std::snprintf(
         pricing,
         sizeof(pricing),
-        "Repair Costs Cap 1.4.4: enabled=%s; repairCosts=%s; maximumGold=%d "
-        "(per item and Repair All); diagnostics=%s.",
+        "Repair Costs Cap 1.4.5: enabled=%s; repairCosts=%s; "
+        "maximumGoldPerItem=%d; maximumGoldRepairAll=%d; diagnostics=%s.",
         Settings.pluginEnabled ? "true" : "false",
         Settings.enabled ? "true" : "false",
-        Settings.maximumGold,
+        Settings.maximumGoldPerItem,
+        Settings.maximumGoldRepairAll,
         Settings.diagnosticsEnabled ? "enabled" : "disabled");
     command->plugin->WriteConsoleMessage(pricing);
 
@@ -605,12 +606,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         message,
         sizeof(message),
-        "Repair Costs Cap 1.4.4 by RuffnecKk loaded: enabled=%s; repairCosts=%s; "
-        "maximumGold=%d (per item and Repair All); durability wear=%s "
+        "Repair Costs Cap 1.4.5 by RuffnecKk loaded: enabled=%s; repairCosts=%s; "
+        "maximumGoldPerItem=%d; maximumGoldRepairAll=%d; durability wear=%s "
         "at %.2f%%; diagnostics=%s.",
         Settings.pluginEnabled ? "true" : "false",
         Settings.enabled ? "true" : "false",
-        Settings.maximumGold,
+        Settings.maximumGoldPerItem,
+        Settings.maximumGoldRepairAll,
         Settings.durabilityWearEnabled ? "enabled" : "disabled",
         Settings.durabilityWearChance * 100.0,
         Settings.diagnosticsEnabled ? "enabled" : "disabled");

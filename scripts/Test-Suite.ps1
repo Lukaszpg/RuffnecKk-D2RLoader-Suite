@@ -284,7 +284,10 @@ foreach ($entry in $pluginEntries) {
     }
 
     $nestedBuilds = @(Get-ChildItem -LiteralPath $pluginDirectory -Directory -Recurse |
-        Where-Object Name -Match '^build(?:-.+)?$')
+        Where-Object {
+            $_.Name -match '^build(?:-.+)?$' -and
+            $_.FullName -notmatch '(?i)[\\/]vendor[\\/]'
+        })
     if ($nestedBuilds.Count -ne 0) {
         $errors.Add("$slug contains a nested build directory.")
     }
@@ -367,13 +370,15 @@ foreach ($entry in $pluginEntries) {
     }
     elseif ($slug -eq 'mapsense') {
         $approvedD3D12Lookup = $sourceText -match 'GetProcAddress\s*\(\s*d3d12Module\s*,\s*"D3D12CreateDevice"\s*\)'
+        $approvedD3D12DebugLookup = $sourceText -match 'GetProcAddress\s*\(\s*module\s*,\s*"D3D12GetDebugInterface"\s*\)'
         $approvedIsInGameLookup = $sourceText -match 'GetProcAddress\s*\(\s*core\s*,\s*D2RL::CoreExports::IsInGameInfo\.name\s*\)'
         $approvedCommandLookup = $sourceText -match 'GetProcAddress\s*\(\s*core\s*,\s*D2RL::CoreExports::ExecuteConsoleCommandInfo\.name\s*\)'
         $approvedFloatingDamageLookup = $sourceText -match 'GetProcAddress\s*\(\s*floatingDamage\s*,\s*"RuffnecKkFloatingDamageUseMapSenseOverlayHost"\s*\)'
-        if ($getProcAddressMatches.Count -ne 4 -or -not $approvedD3D12Lookup -or
+        if ($getProcAddressMatches.Count -ne 5 -or -not $approvedD3D12Lookup -or
+            -not $approvedD3D12DebugLookup -or
             -not $approvedIsInGameLookup -or -not $approvedCommandLookup -or
             -not $approvedFloatingDamageLookup) {
-            $errors.Add('mapsense may resolve only D3D12CreateDevice, two governed D2RCore exports and the versioned Floating Damage handoff.')
+            $errors.Add('mapsense may resolve only D3D12CreateDevice, its compile-gated debug interface, two governed D2RCore exports and the versioned Floating Damage handoff.')
         }
         $rendererStorageOwnsSwapChainRegistry = $sourceText -match
             '(?s)struct\s+RendererStorage\s*\{\s*std::vector<SwapChainQueueBinding>\s+swapChainQueueBindings\s*;'
@@ -420,9 +425,19 @@ foreach ($entry in $pluginEntries) {
         }
         $shippedConfigPath = Join-Path $pluginDirectory 'config\ruffneckk-mapsense.toml'
         $shippedConfigText = Get-Content -LiteralPath $shippedConfigPath -Raw
-        if ($shippedConfigText -notmatch '(?m)^schema_version\s*=\s*17\s*$' -or
+        if ($shippedConfigText -notmatch '(?m)^schema_version\s*=\s*18\s*$' -or
             $shippedConfigText -notmatch '(?m)^interface_scale\s*=\s*"automatic"\s*$') {
-            $errors.Add('mapsense shipped configuration must default schema-17 interface scaling to automatic.')
+            $errors.Add('mapsense shipped configuration must default schema-18 interface scaling to automatic.')
+        }
+    }
+    elseif ($slug -eq 'auto-pickup') {
+        $approvedRouteAdvisorLookup =
+            $sourceText -match 'GetModuleHandleExW\(\s*0,\s*L"d2rl-ruffneckk-stack-manager\.dll",\s*&module\s*\)' -and
+            $sourceText -match 'GetProcAddress\(module,\s*AutoPickupRoute::ExportName\)'
+        if ($getProcAddressMatches.Count -ne 1 -or
+            -not $approvedRouteAdvisorLookup) {
+            $errors.Add(
+                'auto-pickup may resolve only the optional versioned Stack Manager route-advisor API.')
         }
     }
     elseif ($getProcAddressMatches.Count -ne 0) {
@@ -478,8 +493,13 @@ foreach ($entry in $pluginEntries) {
         $errors.Add("$slug must log the observed build name and gate native work through its complete fingerprint.")
     }
 
-    $tomlFiles = @(Get-ChildItem -LiteralPath $pluginDirectory -Filter '*.toml' -File -Recurse)
-    $jsonFiles = @(Get-ChildItem -LiteralPath $pluginDirectory -Filter '*.json' -File -Recurse)
+    $publicConfigRoot = Join-Path $pluginDirectory 'config'
+    $tomlFiles = @(if (Test-Path -LiteralPath $publicConfigRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $publicConfigRoot -Filter '*.toml' -File -Recurse
+    })
+    $jsonFiles = @(if (Test-Path -LiteralPath $publicConfigRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $publicConfigRoot -Filter '*.json' -File -Recurse
+    })
     $manifestConfigs = @()
     if ($hasReleaseAllowlist) {
         $manifestConfigs = @($allowlist.entries | Where-Object {

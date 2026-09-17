@@ -1,6 +1,12 @@
 #include "reveal_engine.hpp"
 
 #include "external_label_provider.hpp"
+#include "gps_collision_foreign_neighbour_policy.hpp"
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+#include "gps_collision_attempt_tracker.hpp"
+#endif
+#include "gps_collision_artifact.hpp"
+#include "gps_collision_probe.hpp"
 
 #include <D2RLPlugin/api.h>
 #include <D2RLPlugin/core_exports.h>
@@ -13,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -54,10 +61,17 @@ constexpr std::uintptr_t DrlgSeedInitializationWitnessRva = 0x326E89;
 constexpr std::size_t UnitTypeOffset = 0x00;
 constexpr std::size_t UnitDynamicPathOffset = 0x38;
 constexpr std::size_t ActiveRoomDrlgRoomOffset = 0x18;
+constexpr std::size_t ActiveRoomCollisionGridOffset = 0x38;
+constexpr std::size_t DrlgRoomActiveRoomOffset = 0x58;
+constexpr std::size_t DrlgRoomTileXOffset = 0x60;
+constexpr std::size_t DrlgRoomTileYOffset = 0x64;
+constexpr std::size_t DrlgRoomWidthOffset = 0x68;
+constexpr std::size_t DrlgRoomHeightOffset = 0x6C;
 constexpr std::size_t DrlgRoomLevelOffset = 0x90;
 constexpr std::size_t LevelFirstRoomOffset = 0x10;
 constexpr std::size_t LevelDrlgOffset = 0x1C8;
 constexpr std::size_t LevelIdOffset = 0x1F8;
+constexpr std::size_t CollisionGridCellsOffset = 0x20;
 constexpr std::size_t RoomNextOffset = 0x48;
 constexpr std::size_t RoomNearCountOffset = 0x18;
 constexpr std::size_t RoomFlagsOffset = 0x50;
@@ -162,6 +176,16 @@ static_assert(std::is_trivially_copyable_v<NativeAutomapCellKey>);
 
 const D2RL::PluginContext* Context{};
 std::uint8_t* Base{};
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+std::atomic_uint64_t GpsProbeSessionGeneration{};
+std::mutex GpsProbeAttemptMutex;
+GpsCollisionProbeAttemptTracker GpsProbeAttemptedLevels;
+struct GpsProbeIdentityContext final {
+    std::uint64_t generation{};
+    void* drlg{};
+    void* level{};
+};
+#endif
 GetLocalDataContextFn GetLocalDataContext{};
 GetLocalPlayerFn GetLocalPlayer{};
 InitLevelFn InitLevel{};
@@ -903,6 +927,213 @@ auto ResolveClientLevel(ClientLevelView& output) noexcept -> bool {
     }
 }
 
+[[nodiscard]] auto CollectLevelActiveRooms(
+        void* level,
+        void** output,
+        std::uint32_t capacity,
+        std::uint32_t& count) noexcept -> bool {
+    count = 0U;
+    __try {
+        if (level == nullptr || output == nullptr || capacity == 0U) return false;
+        auto* room = *reinterpret_cast<std::uint8_t**>(
+            static_cast<std::uint8_t*>(level) + LevelFirstRoomOffset);
+        while (room != nullptr && count < capacity) {
+            auto* const activeRoom = *reinterpret_cast<std::uint8_t**>(
+                room + RoomActiveRoomOffset);
+            if (activeRoom == nullptr
+                || *reinterpret_cast<void**>(activeRoom + ActiveRoomDrlgRoomOffset)
+                    != room
+                || *reinterpret_cast<void**>(room + DrlgRoomLevelOffset) != level) {
+                return false;
+            }
+            output[count++] = activeRoom;
+            room = *reinterpret_cast<std::uint8_t**>(room + RoomNextOffset);
+        }
+        return room == nullptr && count != 0U;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        count = 0U;
+        return false;
+    }
+}
+
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+[[nodiscard]] auto ReadGpsProbeIdentity(
+        void* userData,
+        GpsCollisionProbeIdentity& output) noexcept -> bool {
+    if (userData == nullptr) return false;
+    const auto& expected = *static_cast<const GpsProbeIdentityContext*>(userData);
+    ClientLevelView current{};
+    if (expected.generation == 0U
+        || GpsProbeSessionGeneration.load(std::memory_order_acquire)
+            != expected.generation
+        || !ResolveClientLevel(current)
+        || current.drlg != expected.drlg || current.level != expected.level) {
+        return false;
+    }
+    output = {
+        .sessionGeneration = expected.generation,
+        .mapSeed = current.mapSeed,
+        .difficulty = current.difficulty,
+        .levelId = current.levelId,
+    };
+    return true;
+}
+
+// This is a fail-closed leaf read. The pointer chain and offsets are already
+// governed by ResolveClientLevel and CollectLevelActiveRooms: ActiveRoom+0x18
+// -> DrlgRoom, DrlgRoom+0x90 -> Level, Level+0x1C8 -> client DRLG, and
+// Level+0x1F8 -> positive level id. Boundary rooms are admissible only when
+// they share this capture's client DRLG but belong to another level.
+[[nodiscard]] auto ValidateGpsProbeForeignNeighbour(
+        void* userData,
+        void* activeRoom,
+        const GpsCollisionProbeIdentity& expected) noexcept -> bool {
+    if (userData == nullptr || activeRoom == nullptr) return false;
+    const auto& context = *static_cast<const GpsProbeIdentityContext*>(userData);
+    __try {
+        if (context.generation == 0U
+            || context.generation != expected.sessionGeneration
+            || context.drlg == nullptr || context.level == nullptr
+            || GpsProbeSessionGeneration.load(std::memory_order_acquire)
+                != context.generation) {
+            return false;
+        }
+        auto* const drlgRoom = *reinterpret_cast<std::uint8_t**>(
+            static_cast<std::uint8_t*>(activeRoom) + ActiveRoomDrlgRoomOffset);
+        if (drlgRoom == nullptr) return false;
+        auto* const level = *reinterpret_cast<std::uint8_t**>(
+            drlgRoom + DrlgRoomLevelOffset);
+        auto* const collisionGrid = *reinterpret_cast<std::uint8_t**>(
+            static_cast<std::uint8_t*>(activeRoom) + ActiveRoomCollisionGridOffset);
+        GpsCollisionProbeForeignNeighbourView foreign{
+            .activeRoom = activeRoom,
+            .drlgRoom = drlgRoom,
+            .drlgRoomActiveRoom = *reinterpret_cast<void**>(
+                drlgRoom + DrlgRoomActiveRoomOffset),
+            .level = level,
+            .owningDrlg = level == nullptr ? nullptr : *reinterpret_cast<void**>(
+                level + LevelDrlgOffset),
+            .levelId = level == nullptr ? 0 : *reinterpret_cast<const std::int32_t*>(
+                level + LevelIdOffset),
+            .roomTileX = *reinterpret_cast<const std::int32_t*>(
+                drlgRoom + DrlgRoomTileXOffset),
+            .roomTileY = *reinterpret_cast<const std::int32_t*>(
+                drlgRoom + DrlgRoomTileYOffset),
+            .roomWidth = *reinterpret_cast<const std::int32_t*>(
+                drlgRoom + DrlgRoomWidthOffset),
+            .roomHeight = *reinterpret_cast<const std::int32_t*>(
+                drlgRoom + DrlgRoomHeightOffset),
+            .collisionGrid = collisionGrid,
+            .gridX = collisionGrid == nullptr ? 0 : *reinterpret_cast<const std::int32_t*>(
+                collisionGrid + 0x00U),
+            .gridY = collisionGrid == nullptr ? 0 : *reinterpret_cast<const std::int32_t*>(
+                collisionGrid + 0x04U),
+            .gridWidth = collisionGrid == nullptr ? 0 : *reinterpret_cast<const std::int32_t*>(
+                collisionGrid + 0x08U),
+            .gridHeight = collisionGrid == nullptr ? 0 : *reinterpret_cast<const std::int32_t*>(
+                collisionGrid + 0x0CU),
+            .gridCells = collisionGrid == nullptr ? nullptr
+                : *reinterpret_cast<const std::uint16_t* const*>(
+                    collisionGrid + CollisionGridCellsOffset),
+        };
+        return IsGpsCollisionProbeForeignNeighbourValid({
+            .clientDrlg = context.drlg,
+            .currentLevel = context.level,
+            .currentLevelId = expected.levelId,
+        }, foreign);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+#endif
+
+[[nodiscard]] auto ReserveGpsCollisionDiagnostic(
+        const ClientLevelView& current,
+        std::uint64_t& generation) noexcept -> bool {
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+    generation = 0U;
+    if (!IsGpsCollisionProbeActive()) return false;
+    const auto observedGeneration = GpsProbeSessionGeneration.load(
+        std::memory_order_acquire);
+    {
+        std::scoped_lock lock(GpsProbeAttemptMutex);
+        if (!GpsProbeAttemptedLevels.ReserveFirstAttempt(
+                observedGeneration, current.levelId)) {
+            return false;
+        }
+    }
+    generation = observedGeneration;
+    return true;
+#else
+    (void)current;
+    generation = 0U;
+    return false;
+#endif
+}
+
+void CaptureReservedGpsCollisionDiagnostic(
+        const ClientLevelView& current,
+        std::uint64_t generation) noexcept {
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+    std::array<void*, MaximumRoomsPerLevel> rooms{};
+    std::uint32_t roomCount{};
+    if (!CollectLevelActiveRooms(
+            current.level, rooms.data(), MaximumRoomsPerLevel, roomCount)) {
+        if (Context != nullptr) {
+            Context->LogWarn(
+                "MapSense GPS collision diagnostic: the fully active room inventory was unavailable.");
+        }
+        return;
+    }
+    GpsCollisionProbeResult result;
+    GpsProbeIdentityContext identityContext{
+        generation, current.drlg, current.level};
+    if (!RunGpsCollisionProbe(
+            std::span<void* const>(rooms.data(), roomCount),
+            GpsCollisionProbeLimits{},
+            ReadGpsProbeIdentity,
+            ValidateGpsProbeForeignNeighbour,
+            &identityContext,
+            result)) {
+        if (Context != nullptr) {
+            char message[192]{};
+            std::snprintf(message, sizeof(message),
+                "MapSense GPS collision diagnostic: shadow capture refused status=%u rooms=%u.",
+                static_cast<unsigned>(result.status), roomCount);
+            Context->LogWarn(message);
+        }
+        return;
+    }
+    result.artifact.session = "pid:" + std::to_string(GetCurrentProcessId())
+        + ";generation:" + std::to_string(generation);
+    std::filesystem::path path;
+    if (!WriteGpsCollisionArtifact(result.artifact, path)) {
+        if (Context != nullptr) {
+            Context->LogWarn(
+                "MapSense GPS collision diagnostic: the immutable MSNC artifact could not be created.");
+        }
+        return;
+    }
+    if (Context != nullptr) {
+        const auto pathText = path.string();
+        char message[1024]{};
+        std::snprintf(message, sizeof(message),
+            "MapSense GPS collision diagnostic: wrote %s.", pathText.c_str());
+        Context->LogInfo(message);
+    }
+#else
+    (void)current;
+    (void)generation;
+#endif
+}
+
+void TryCaptureGpsCollisionDiagnostic(const ClientLevelView& current) noexcept {
+    std::uint64_t generation{};
+    if (ReserveGpsCollisionDiagnostic(current, generation)) {
+        CaptureReservedGpsCollisionDiagnostic(current, generation);
+    }
+}
+
 auto ResolveClientLevelByIdUnchecked(
         const ClientLevelView& current,
         std::int32_t levelId,
@@ -1109,12 +1340,6 @@ auto ValidateRuntime() noexcept -> bool {
         0x24, 0x18, 0x41, 0x56, 0x4C, 0x8B, 0x09, 0x4C,
         0x8D, 0x35, 0xDA, 0x63, 0x95, 0x02, 0x4D, 0x8B,
         0xD8, 0x48, 0x8B, 0xF1, 0x4C, 0x8B, 0xD1, 0x4D};
-    // Unique serializer epilogue: [RSI+8] is the emitted uint16 element count,
-    // not tree+0x20's total node count. Each zero-tag key contributes three
-    // words; the doubled signed result bounds only those emitted records.
-    constexpr std::array<std::uint8_t, 13> serializerLimitExpected{
-        0x0F, 0xB7, 0x4E, 0x08, 0x66, 0x03, 0xC9,
-        0x0F, 0xBF, 0xC9, 0x41, 0x89, 0x0F};
     // The standard room callback proves both the Levels record +0x08 Layer
     // field and the GetOrCreateLayer ABI before it reveals the ActiveRoom.
     constexpr std::array<std::uint8_t, 31> layerWitnessExpected{
@@ -1159,6 +1384,16 @@ auto ValidateRuntime() noexcept -> bool {
             expected.data(),
             static_cast<std::uint32_t>(expected.size()));
     };
+    const auto checkSerializerByteCount = []() noexcept {
+        std::array<std::uint8_t, 13U> live{};
+        const auto* const address = reinterpret_cast<const std::uint8_t*>(
+            Context->exeBase + AutomapSerializerLimitWitnessRva);
+        std::copy_n(address, live.size(), live.begin());
+        if (IsSupportedNativeAutomapSerializerByteCount(live)) return true;
+        Context->LogError(
+            "MapSense: automap serializer byte-count witness matched neither the complete vanilla nor RuffnecKk fixed state.");
+        return false;
+    };
     return check(GetLocalDataContextRva, localContextExpected)
         && check(GetLocalPlayerRva, localPlayerExpected)
         && check(GetLevelRva, getLevelExpected)
@@ -1185,9 +1420,7 @@ auto ValidateRuntime() noexcept -> bool {
         && check(CurrentAutomapLayerOwnerWitnessRva, currentOwnerExpected)
         && check(FindAutomapCellRva, findCellExpected)
         && check(InsertAutomapCellRva, insertCellExpected)
-        && check(
-            AutomapSerializerLimitWitnessRva,
-            serializerLimitExpected)
+        && checkSerializerByteCount()
         && check(
             StandardAutomapLayerWitnessRva,
             layerWitnessExpected)
@@ -1242,6 +1475,12 @@ auto InitializeRevealEngine(
     FindAutomapCell = At<FindAutomapCellFn>(FindAutomapCellRva);
     InsertAutomapCell = At<InsertAutomapCellFn>(InsertAutomapCellRva);
     ResetNativeAutomapAtlasPublication(0U);
+    if (!InitializeGpsCollisionProbe(context)) {
+        Context->LogError(
+            "MapSense: GPS collision diagnostic native profile mismatch; plugin refused.");
+        ShutdownRevealEngine();
+        return false;
+    }
 
     constexpr std::array<std::uint8_t, 14> hookExpected{
         0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x41,
@@ -1276,6 +1515,7 @@ void SetRevealLevelInitializedCallback(
 
 void ShutdownRevealEngine() noexcept {
     Active.store(false, std::memory_order_release);
+    ShutdownGpsCollisionProbe();
     SetRevealLevelInitializedCallback(nullptr, nullptr);
     RevealAllArmed.store(false, std::memory_order_release);
     ResetNativeAutomapAtlasPublication(0U);
@@ -1286,6 +1526,15 @@ void ShutdownRevealEngine() noexcept {
 }
 
 void BeginRevealSession() noexcept {
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+    const auto generation = GpsProbeSessionGeneration.fetch_add(
+        1U, std::memory_order_acq_rel) + 1U;
+    {
+        std::scoped_lock lock(GpsProbeAttemptMutex);
+        GpsProbeAttemptedLevels.BeginSession(generation);
+    }
+    ResetGpsCollisionProbe();
+#endif
     LevelsRevealed.store(0, std::memory_order_relaxed);
     RoomsRevealed.store(0, std::memory_order_relaxed);
     RevealFailures.store(0, std::memory_order_relaxed);
@@ -1323,10 +1572,32 @@ auto RevealCurrentZone() noexcept -> RevealOutcome {
     ClientLevelView current{};
     if (ResolveClientLevel(current)
         && RevealLevelUnchecked(current.dataContext, current.level)) {
+        TryCaptureGpsCollisionDiagnostic(current);
         return RevealOutcome::Complete;
     }
     RevealFailures.fetch_add(1, std::memory_order_relaxed);
     return RevealOutcome::Unavailable;
+}
+
+void CaptureGpsCollisionDiagnosticForRevealMap() noexcept {
+#if RUFFNECKK_MAPSENSE_ENABLE_GPS_COLLISION_PROBE
+    if (!Active.load(std::memory_order_acquire)
+        || !IsGpsCollisionProbeActive()) {
+        return;
+    }
+    ClientLevelView current{};
+    std::uint64_t generation{};
+    if (!ResolveClientLevel(current)
+        || !ReserveGpsCollisionDiagnostic(current, generation)) {
+        return;
+    }
+    if (RevealLevelUnchecked(current.dataContext, current.level)) {
+        CaptureReservedGpsCollisionDiagnostic(current, generation);
+    } else if (Context != nullptr) {
+        Context->LogWarn(
+            "MapSense GPS collision diagnostic: current-level activation failed; capture was not attempted.");
+    }
+#endif
 }
 
 auto ResolveCurrentClientLevelView(

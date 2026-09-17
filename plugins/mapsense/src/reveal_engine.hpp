@@ -71,6 +71,27 @@ inline constexpr std::uint64_t NativeAutomapMaximumEmittedTreeCells =
     return emittedCellCount < NativeAutomapMaximumEmittedTreeCells;
 }
 
+// Automap Serialization Fix owns this exact epilogue when installed. MapSense
+// is a read-only consumer and accepts either complete state so load order does
+// not become a hidden dependency. Any partial or third-party sequence remains
+// incompatible with the native reveal fingerprint.
+inline constexpr std::array<std::uint8_t, 13U>
+    NativeAutomapSerializerByteCountVanilla{
+        0x0F, 0xB7, 0x4E, 0x08, 0x66, 0x03, 0xC9,
+        0x0F, 0xBF, 0xC9, 0x41, 0x89, 0x0F,
+    };
+inline constexpr std::array<std::uint8_t, 13U>
+    NativeAutomapSerializerByteCountWide{
+        0x33, 0xC9, 0x8B, 0x56, 0x08, 0x03, 0xD2,
+        0x0F, 0x43, 0xCA, 0x41, 0x89, 0x0F,
+    };
+
+[[nodiscard]] constexpr auto IsSupportedNativeAutomapSerializerByteCount(
+        const std::array<std::uint8_t, 13U>& bytes) noexcept -> bool {
+    return bytes == NativeAutomapSerializerByteCountVanilla
+        || bytes == NativeAutomapSerializerByteCountWide;
+}
+
 // Converts one immutable mapgen tile into the exact 12-byte native cell-key
 // coordinate basis. D2R's ordinary tile path performs the same
 // (tileX-tileY)*8, (tileX+tileY)*4 conversion and raises orientations >= 0x10
@@ -758,6 +779,10 @@ void BeginRevealSession() noexcept;
 void ResetRevealSession() noexcept;
 
 auto RevealCurrentZone() noexcept -> RevealOutcome;
+// The non-public GPS build alone uses Reveal Map as an explicit capture
+// trigger. It synchronously activates the current level, then snapshots only
+// private CollMap clones. Public builds compile this to a no-op.
+void CaptureGpsCollisionDiagnosticForRevealMap() noexcept;
 // Legacy diagnostic actions retain D2RCore's public revealmap command. The
 // product-facing Reveal Map toggle does not use this path; it publishes the
 // generated atlas directly into D2R's native cell trees without rooms.

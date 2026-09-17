@@ -1,6 +1,7 @@
 #pragma once
 
 #include "overlay_scene.hpp"
+#include "navigation_engine.hpp"
 
 #include <array>
 #include <cstddef>
@@ -370,10 +371,47 @@ struct NativeAutomapMarkerCounters final {
     std::uint32_t maximumPublishedDistance{};
 };
 
+struct NativeNavigationObservationCounters final {
+    std::uint64_t localPlayerPasses{};
+    std::uint64_t deadPlayerPasses{};
+    std::uint64_t observationAttempts{};
+    std::uint64_t missingDependencies{};
+    std::uint64_t levelReadFailures{};
+    std::uint64_t viewportFailures{};
+    std::uint64_t coordinatedPasses{};
+    std::uint64_t faults{};
+};
+
+enum class NativeAutomapObservationPhase : std::uint8_t {
+    BeforeProjection,
+    AfterObservation,
+};
+
 using NativeAutomapLevelObservedCallback = void(*)(
     std::int32_t currentLevelId,
     bool levelChanged,
+    NativeAutomapObservationPhase phase,
     void* userData) noexcept;
+
+// Keep coordinator publication outside the projection lock, on the native
+// observation thread. The observer also retains the existing POI pass order.
+template<class Observer>
+void RunNativeAutomapObservation(
+        const NavigationAutomapPass& pass,
+        Observer&& observe,
+        NativeAutomapLevelObservedCallback callback,
+        void* userData) noexcept {
+    if (callback != nullptr) {
+        callback(pass.currentLevelId, false,
+            NativeAutomapObservationPhase::BeforeProjection, userData);
+    }
+    const auto observation = observe();
+    if (callback != nullptr) {
+        callback(pass.currentLevelId,
+            ShouldRequestNavigationRefresh(observation, pass.inTown),
+            NativeAutomapObservationPhase::AfterObservation, userData);
+    }
+}
 
 auto InitializeNativeAutomapMarker(
     const D2RL::PluginContext* context,
@@ -388,6 +426,8 @@ void InvalidateNativeAutomapMarkerFrame() noexcept;
 // frame without rebuilding them.
 void InvalidateNativeAutomapLocalPlayerFrame() noexcept;
 [[nodiscard]] auto IsNativeAutomapLocalPlayerFrameAlive() noexcept -> bool;
+[[nodiscard]] auto GetNativeNavigationObservationCounters() noexcept
+    -> NativeNavigationObservationCounters;
 void SetNativeAutomapMarkerEnabled(bool enabled) noexcept;
 void SetNativeAutomapImmunityCollectionEnabled(bool enabled) noexcept;
 void SetNativeAutomapLevelObservedCallback(

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 
 project(
     RuffnecKkD2RLoaderSuite
-    VERSION 1.3.2
+    VERSION 1.4.0
     DESCRIPTION "Independent RuffnecKk plugins for D2RLoader"
     LANGUAGES CXX
 )

@@ -23,6 +23,7 @@ set(RUFFNECKK_SUITE_PLUGIN_DIRECTORIES
     extended-act-level-ids
     isc12
     mapsense
+    playerx-scaling-tweaks
 )
 
 foreach(plugin_directory IN LISTS RUFFNECKK_SUITE_PLUGIN_DIRECTORIES)

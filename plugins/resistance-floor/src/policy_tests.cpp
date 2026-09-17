@@ -150,7 +150,6 @@ void TestSourceContracts() {
     const auto cmake = ReadFile(RESISTANCE_FLOOR_CMAKE_SOURCE);
     const auto resource = ReadFile(RESISTANCE_FLOOR_RC_SOURCE);
     const auto readme = ReadFile(RESISTANCE_FLOOR_README_SOURCE);
-    const auto validation = ReadFile(RESISTANCE_FLOOR_VALIDATION_SOURCE);
     CHECK(plugin.find(".author = \"RuffnecKk\"") != std::string::npos);
     CHECK(plugin.find("ModScopedOnly") == std::string::npos);
     CHECK(plugin.find("92777") == std::string::npos);
@@ -170,8 +169,6 @@ void TestSourceContracts() {
     CHECK(resource.find("1.0.1") == std::string::npos);
     CHECK(readme.find("# Resistance Floor 1.0.2") != std::string::npos);
     CHECK(readme.find("1.0.1") == std::string::npos);
-    CHECK(validation.find("Version 1.0.2") != std::string::npos);
-    CHECK(validation.find("Version 1.0.1") == std::string::npos);
     CHECK(plugin.find("0x4524C4") != std::string::npos);
     CHECK(plugin.find("0x4524E7") != std::string::npos);
     CHECK(plugin.find("0x14E729A") != std::string::npos);

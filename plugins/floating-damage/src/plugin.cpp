@@ -10,6 +10,7 @@
 #include "d3d12_renderer.hpp"
 #include "default_config.hpp"
 #include "floating_damage.hpp"
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include <Windows.h>
 
@@ -36,8 +37,6 @@ constexpr std::uintptr_t HitpointsCommitContextRva = 0x44D083;
 constexpr std::uintptr_t HitpointsCommitCallRva = 0x44D093;
 constexpr std::uintptr_t PeriodicHitpointsCommitContextRva = 0x448D3B;
 constexpr std::uintptr_t PeriodicHitpointsCommitCallRva = 0x448D4C;
-constexpr std::uintptr_t GetUnitStatRva = 0x2F5020;
-constexpr std::uintptr_t SetUnitStatRva = 0x2F7D10;
 constexpr std::uintptr_t CheckStateRva = 0x3351B0;
 constexpr std::uintptr_t GetClientUnitRva = 0x09A5D0;
 constexpr std::uintptr_t UpdateCameraRva = 0x0B9B90;
@@ -101,10 +100,6 @@ struct NativeScreenPoint {
     float y;
 };
 
-using GetUnitStatFn = std::int32_t(__fastcall*)(
-    UnitView*, std::int32_t, std::uint16_t) noexcept;
-using SetUnitStatFn = void(__fastcall*)(
-    UnitView*, std::int32_t, std::int32_t, std::uint16_t) noexcept;
 using CheckStateFn = std::int32_t(__fastcall*)(
     UnitView*, std::int32_t) noexcept;
 using GetClientUnitFn = UnitView*(__fastcall*)(
@@ -117,8 +112,21 @@ using ProjectUnitToScreenFn = bool(__fastcall*)(
 using UpdateCameraFn = void(__fastcall*)() noexcept;
 using GetRenderThreadContextRootFn = void*(__fastcall*)() noexcept;
 using GetNativeDimensionFn = std::int32_t(__fastcall*)() noexcept;
-GetUnitStatFn GetUnitStat{};
-SetUnitStatFn SetUnitStat{};
+// STATLIST_GetUnitStat at 0x2F5020 and STATLIST_SetUnitStat at 0x2F7D10
+// are admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 CheckStateFn CheckState{};
 GetClientUnitFn GetClientUnit{};
 ProjectUnitToScreenFn ProjectUnitToScreen{};
@@ -176,7 +184,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-floating-damage",
     .name = "Floating Damage",
-    .version = "1.4.3",
+    .version = "1.5.0",
     .author = "RuffnecKk",
     .description = "Shows floating combat numbers and rolling damage per second.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
@@ -938,8 +946,9 @@ bool TryGetMonsterId(UnitView* target, std::uint32_t& unitId) noexcept {
 
 bool TryGetFixedHitpoints(UnitView* target, std::int32_t& hitpoints) noexcept {
     __try {
-        if (!target || !GetUnitStat) return false;
-        hitpoints = GetUnitStat(target, HitPointsStatId, 0);
+        if (!target || !NativeStats.IsBound(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat)) return false;
+        hitpoints = NativeStats.GetUnitStat(target, HitPointsStatId, 0);
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1037,7 +1046,7 @@ __declspec(noinline) void __fastcall HookHitpointsCommit(
     UnitView* target,
     std::int32_t statId,
     std::int32_t newFixed,
-    std::uint16_t layer,
+    std::uint32_t layer,
     UnitView*,
     void* damage
 ) noexcept {
@@ -1053,7 +1062,7 @@ __declspec(noinline) void __fastcall HookHitpointsCommit(
         ? ElementFromDamage(damage)
         : FloatingDamage::Element::Physical;
 
-    SetUnitStat(target, statId, newFixed, layer);
+    NativeStats.SetUnitStatWide(target, statId, newFixed, layer);
     if (!observe) return;
 
     std::int32_t afterFixed{};
@@ -1072,7 +1081,7 @@ __declspec(noinline) void __fastcall HookPeriodicHitpointsCommit(
     UnitView* target,
     std::int32_t statId,
     std::int32_t newFixed,
-    std::uint16_t layer
+    std::uint32_t layer
 ) noexcept {
     std::uint32_t targetId{};
     std::int32_t beforeFixed{};
@@ -1085,7 +1094,7 @@ __declspec(noinline) void __fastcall HookPeriodicHitpointsCommit(
         ? ElementFromPeriodicStates(target)
         : FloatingDamage::Element::Physical;
 
-    SetUnitStat(target, statId, newFixed, layer);
+    NativeStats.SetUnitStatWide(target, statId, newFixed, layer);
     if (!observe) return;
 
     std::int32_t afterFixed{};
@@ -1107,66 +1116,6 @@ bool MatchesSignature(
         rva,
         expected.data(),
         static_cast<std::uint32_t>(expected.size()));
-}
-
-template <std::size_t Size>
-bool ValidateComposableSetUnitStatEntry(
-    const std::array<std::uint8_t, Size>& expected) noexcept {
-    const D2RL::DiagnosticsServiceV1* diagnostics{};
-    if (!Context
-            || Context->QueryService(
-                D2RL::ServiceId::Diagnostics,
-                D2RL::DiagnosticsServiceV1Version,
-                &diagnostics) != D2RL::ServiceQueryResult::Success
-            || !D2RL::HasDiagnosticsServiceV1Field(
-                diagnostics,
-                D2RL::DiagnosticsServiceV1RequiredSize)
-            || !diagnostics->queryHookStatus) {
-        return MatchesSignature(SetUnitStatRva, expected);
-    }
-
-    D2RL::Diagnostics::HookQuery query{
-        .structSize = D2RL::Diagnostics::HookQuerySize,
-        .rva = SetUnitStatRva,
-        .expected = expected.data(),
-        .expectedSize = static_cast<std::uint32_t>(expected.size()),
-    };
-    D2RL::Diagnostics::HookStatus status{
-        .structSize = D2RL::Diagnostics::HookStatusSize,
-    };
-    if (diagnostics->queryHookStatus(Context, &query, &status)
-            != D2RL::Diagnostics::Result::Success) {
-        Context->LogError(
-            "FloatingDamage: Diagnostics v1 could not inspect the shared STATLIST_SetUnitStat entry.");
-        return false;
-    }
-    if (status.state == D2RL::Diagnostics::ModificationState::Unchanged)
-        return true;
-    if (status.state != D2RL::Diagnostics::ModificationState::Tracked
-            || status.kind != D2RL::Diagnostics::ModificationKind::InlineHook
-            || status.ownerCount != 1
-            || status.ownerPluginId[0] == '\0') {
-        char message[256]{};
-        std::snprintf(
-            message,
-            sizeof(message),
-            "FloatingDamage: shared STATLIST_SetUnitStat entry is not composable (state=%u; kind=%u; owners=%u).",
-            static_cast<unsigned>(status.state),
-            static_cast<unsigned>(status.kind),
-            status.ownerCount);
-        Context->LogError(message);
-        return false;
-    }
-
-    char message[256]{};
-    std::snprintf(
-        message,
-        sizeof(message),
-        "FloatingDamage: composing through loader-owned STATLIST_SetUnitStat inline hook (%.*s).",
-        63,
-        status.ownerPluginId);
-    Context->LogInfo(message);
-    return true;
 }
 
 void* AllocateRelayPageNear(void* hint) noexcept {
@@ -1280,16 +1229,6 @@ bool CreatePeriodicHitpointsCommitRelay() noexcept {
 }
 
 bool InstallDamageHook() noexcept {
-    constexpr std::array<std::uint8_t, 29> getUnitStatExpected{
-        0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,
-        0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x83,0xEC,0x20,
-        0x41,0x0F,0xB7,0xE8,0x8B,0xFA,0x48,0x8B,0xD9,
-    };
-    constexpr std::array<std::uint8_t, 29> setUnitStatExpected{
-        0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,
-        0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x83,
-        0xEC,0x40,0x45,0x0F,0xB7,0xE1,0x45,0x8B,0xF0,
-    };
     constexpr std::array<std::uint8_t, 32> checkStateExpected{
         0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,
         0x24,0x10,0x57,0x48,0x83,0xEC,0x20,0x8B,
@@ -1357,8 +1296,20 @@ bool InstallDamageHook() noexcept {
         periodicHitpointsCommitCallExpected{
         0xE8,0xBF,0xEF,0xEA,0xFF,
     };
-    if (!MatchesSignature(GetUnitStatRva, getUnitStatExpected)
-            || !MatchesSignature(CheckStateRva, checkStateExpected)
+    if (!NativeStats.BindCurrentProcess(
+            reinterpret_cast<std::uintptr_t>(Base),
+            RuffnecKk::NativeStatCompat::ToMask(
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+                | RuffnecKk::NativeStatCompat::ToMask(
+                    RuffnecKk::NativeStatCompat::Helper::SetUnitStat))) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "FloatingDamage: stat compatibility admission failed (%s).",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+        return false;
+    }
+    if (!MatchesSignature(CheckStateRva, checkStateExpected)
             || !MatchesSignature(
                 GetClientUnitRva,
                 getClientUnitExpected)
@@ -1385,9 +1336,6 @@ bool InstallDamageHook() noexcept {
                 periodicHitpointsCommitContextExpected)) {
         return false;
     }
-    if (!ValidateComposableSetUnitStatEntry(setUnitStatExpected)) return false;
-    GetUnitStat = reinterpret_cast<GetUnitStatFn>(Base + GetUnitStatRva);
-    SetUnitStat = reinterpret_cast<SetUnitStatFn>(Base + SetUnitStatRva);
     CheckState = reinterpret_cast<CheckStateFn>(Base + CheckStateRva);
     GetClientUnit = reinterpret_cast<GetClientUnitFn>(
         Base + GetClientUnitRva);
@@ -1734,7 +1682,7 @@ auto ConsoleCommand(
         std::snprintf(
             message,
             sizeof(message),
-            "FloatingDamage 1.4.3: enabled=%s; runtime=%s; diagnostics=%s; in_game=%s; input_action=%s; renderer_role=%s; overlay_hooks=%s; presents=%llu; queues=%llu; imgui_attempts=%llu; imgui_failures=%llu; init_stage=%u; overlay_frames=%llu; camera_frames=%llu; context_misses=%llu; captured=%llu; direct=%llu; periodic=%llu; queued=%llu; projected=%llu; rejected=%llu; forced=%llu; missed=%llu; request_drops=%llu; active=%zu; pending=%zu; font=%d; display=%.0fx%.0f; scale=%.3f.",
+            "FloatingDamage 1.5.0: enabled=%s; runtime=%s; diagnostics=%s; in_game=%s; input_action=%s; renderer_role=%s; overlay_hooks=%s; presents=%llu; queues=%llu; imgui_attempts=%llu; imgui_failures=%llu; init_stage=%u; overlay_frames=%llu; camera_frames=%llu; context_misses=%llu; captured=%llu; direct=%llu; periodic=%llu; queued=%llu; projected=%llu; rejected=%llu; forced=%llu; missed=%llu; request_drops=%llu; active=%zu; pending=%zu; font=%d; display=%.0fx%.0f; scale=%.3f.",
             enabled ? "true" : "false",
             RuntimeActive.load(std::memory_order_acquire) ? "active" : "not installed",
             config.diagnosticsEnabled ? "true" : "false",
@@ -1914,7 +1862,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
     if (!FloatingDamage::GetConfig().enabled) {
         D3D12::SetDiagnosticLogCallback(nullptr);
         context->LogInfo(
-            "Floating Damage 1.4.3 by RuffnecKk disabled; no input action, renderer or combat hook was installed.");
+            "Floating Damage 1.5.0 by RuffnecKk disabled; no input action, renderer or combat hook was installed.");
         return true;
     }
     if (!RegisterInputAction())
@@ -1952,7 +1900,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
     }
     FloatingDamage::SetTargetScreenPositionProvider(TryProjectTargetToScreen);
     RuntimeActive.store(true, std::memory_order_release);
-    context->LogInfo("FloatingDamage 1.4.3 active after complete native fingerprint validation with direct and periodic HP-loss capture, autonomous rendering when alone, and priority MapSense host coexistence.");
+    context->LogInfo("FloatingDamage 1.5.0 active after complete native fingerprint validation with direct and periodic HP-loss capture, autonomous rendering when alone, and priority MapSense host coexistence.");
     return true;
 }
 
@@ -2006,8 +1954,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     GetRenderThreadContextRoot = nullptr;
     ProjectUnitToScreen = nullptr;
     GetClientUnit = nullptr;
-    SetUnitStat = nullptr;
-    GetUnitStat = nullptr;
+    NativeStats.Reset();
     CheckState = nullptr;
     Module = nullptr;
     Base = nullptr;

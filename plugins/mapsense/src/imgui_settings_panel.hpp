@@ -1,7 +1,12 @@
 #pragma once
 
 #include "mapsense_config.hpp"
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+#include "gps_route_artifact.hpp"
+#endif
 
+#include <array>
 #include <cstdint>
 
 namespace RuffnecKk::MapSense {
@@ -40,7 +45,12 @@ struct ImGuiSettingsBounds {
     bool& expanded,
     bool revealMapEnabled,
     float menuScale,
-    ImGuiSettingsActionCallback actionCallback) noexcept
+    ImGuiSettingsActionCallback actionCallback
+#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
+    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
+    , std::array<const char*, NavigationLineKindCount> gpsRouteStatuses
+#endif
+    ) noexcept
     -> ImGuiSettingsBounds;
 
 } // namespace RuffnecKk::MapSense

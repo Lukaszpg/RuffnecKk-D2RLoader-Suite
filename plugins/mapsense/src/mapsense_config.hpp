@@ -1,5 +1,7 @@
 #pragma once
 
+#include "navigation_engine.hpp"
+
 #include <toml++/toml.hpp>
 
 #include <algorithm>
@@ -22,7 +24,7 @@
 
 namespace RuffnecKk::MapSense {
 
-inline constexpr std::int64_t CurrentConfigSchemaVersion = 17;
+inline constexpr std::int64_t CurrentConfigSchemaVersion = 18;
 
 inline constexpr float MinimumMonsterMarkerSize = 3.0F;
 inline constexpr float MaximumMonsterMarkerSize = 40.0F;
@@ -311,11 +313,13 @@ using CustomLevelTarget = std::variant<std::int32_t, std::string>;
 
 struct NavigationLineOptions {
     bool enabled{true};
+    NavigationLineMode lineMode{NavigationLineMode::Direct};
     RgbaColor color{};
 };
 
 struct CustomLevelLineOptions {
     bool enabled{};
+    NavigationLineMode lineMode{NavigationLineMode::Direct};
     RgbaColor color{0.78F, 0.36F, 1.0F, 1.0F};
     std::vector<CustomLevelTarget> targets{};
 };
@@ -324,14 +328,17 @@ struct NavigationOptions {
     float lineThickness{DefaultNavigationLineThickness};
     NavigationLineOptions waypoint{
         true,
+        NavigationLineMode::Direct,
         {0.239F, 0.545F, 1.0F, 1.0F},
     };
     NavigationLineOptions progression{
         true,
+        NavigationLineMode::Direct,
         {0.34F, 0.88F, 0.24F, 1.0F},
     };
     NavigationLineOptions quests{
         true,
+        NavigationLineMode::Direct,
         {1.0F, 0.231F, 0.188F, 1.0F},
     };
     CustomLevelLineOptions customLevels{};
@@ -466,6 +473,21 @@ struct Config {
     HudOptions hud{};
     MenuOptions menu{};
 };
+
+inline auto FallbackUnavailableGpsLineModesToDirect(Config& config) noexcept
+        -> bool {
+    bool changed{};
+    const auto fallback = [&changed](auto& options) noexcept {
+        if (options.lineMode == NavigationLineMode::Direct) return;
+        options.lineMode = NavigationLineMode::Direct;
+        changed = true;
+    };
+    fallback(config.navigation.waypoint);
+    fallback(config.navigation.progression);
+    fallback(config.navigation.quests);
+    fallback(config.navigation.customLevels);
+    return changed;
+}
 
 inline auto IsAllowedKey(
         std::string_view key,
@@ -1050,13 +1072,43 @@ inline auto ReadObjectsOptions(
     return fallback;
 }
 
+inline auto NavigationLineModeToString(
+        NavigationLineMode mode) noexcept -> std::string_view {
+    switch (mode) {
+        case NavigationLineMode::Direct: return "direct";
+        case NavigationLineMode::GpsWalk: return "gps_walk";
+        case NavigationLineMode::GpsTeleport: return "gps_teleport";
+    }
+    return "direct";
+}
+
+inline auto ParseNavigationLineMode(std::string_view value) -> NavigationLineMode {
+    if (value == "direct") return NavigationLineMode::Direct;
+    if (value == "gps_walk") return NavigationLineMode::GpsWalk;
+    if (value == "gps_teleport") return NavigationLineMode::GpsTeleport;
+    throw std::runtime_error(
+        "MapSense navigation line_mode must use direct, gps_walk, or gps_teleport");
+}
+
 inline auto ReadNavigationLineOptions(
         const toml::table& navigation,
         std::string_view key,
-        NavigationLineOptions fallback) -> NavigationLineOptions {
+        NavigationLineOptions fallback,
+        std::int64_t schemaVersion) -> NavigationLineOptions {
     const auto* line = ReadOptionalTable(navigation, key);
     if (line == nullptr) return fallback;
-    RejectUnknownKeys(*line, {"enabled", "color"}, key);
+    if (schemaVersion >= 18) {
+        RejectUnknownKeys(*line, {"enabled", "line_mode", "color"}, key);
+        const auto* mode = line->get("line_mode");
+        if (mode == nullptr || !mode->is_string()) {
+            throw std::runtime_error(
+                "MapSense navigation line_mode is required and must be a string");
+        }
+        fallback.lineMode = ParseNavigationLineMode(*mode->value<std::string>());
+    } else {
+        RejectUnknownKeys(*line, {"enabled", "color"}, key);
+        fallback.lineMode = NavigationLineMode::Direct;
+    }
     fallback.enabled = ReadOptional(*line, "enabled", fallback.enabled);
     fallback.color = ReadOptionalColor(*line, "color", fallback.color);
     return fallback;
@@ -1154,15 +1206,30 @@ inline auto ReadCustomLevelTargets(
 
 inline auto ReadCustomLevelLineOptions(
         const toml::table& navigation,
-        CustomLevelLineOptions fallback) -> CustomLevelLineOptions {
+        CustomLevelLineOptions fallback,
+        std::int64_t schemaVersion) -> CustomLevelLineOptions {
     const auto* customLevels = ReadOptionalTable(
         navigation,
         "custom_levels");
     if (customLevels == nullptr) return fallback;
-    RejectUnknownKeys(
-        *customLevels,
-        {"enabled", "color", "targets"},
-        "navigation.custom_levels");
+    if (schemaVersion >= 18) {
+        RejectUnknownKeys(
+            *customLevels,
+            {"enabled", "line_mode", "color", "targets"},
+            "navigation.custom_levels");
+        const auto* mode = customLevels->get("line_mode");
+        if (mode == nullptr || !mode->is_string()) {
+            throw std::runtime_error(
+                "MapSense navigation line_mode is required and must be a string");
+        }
+        fallback.lineMode = ParseNavigationLineMode(*mode->value<std::string>());
+    } else {
+        RejectUnknownKeys(
+            *customLevels,
+            {"enabled", "color", "targets"},
+            "navigation.custom_levels");
+        fallback.lineMode = NavigationLineMode::Direct;
+    }
     fallback.enabled = ReadOptional(
         *customLevels,
         "enabled",
@@ -1475,18 +1542,22 @@ inline auto ParseConfig(const toml::table& root) -> Config {
         config.navigation.waypoint = ReadNavigationLineOptions(
             *navigation,
             "waypoint",
-            config.navigation.waypoint);
+            config.navigation.waypoint,
+            *schemaVersion);
         config.navigation.progression = ReadNavigationLineOptions(
             *navigation,
             "progression",
-            config.navigation.progression);
+            config.navigation.progression,
+            *schemaVersion);
         config.navigation.quests = ReadNavigationLineOptions(
             *navigation,
             "quests",
-            config.navigation.quests);
+            config.navigation.quests,
+            *schemaVersion);
         config.navigation.customLevels = ReadCustomLevelLineOptions(
             *navigation,
-            std::move(config.navigation.customLevels));
+            std::move(config.navigation.customLevels),
+            *schemaVersion);
     }
     if (*schemaVersion < 8) {
         // Quest lines were reserved and hidden through schema 7. Enable the
@@ -1803,18 +1874,22 @@ inline auto SerializeConfig(const Config& config) -> std::string {
         << "line_thickness = " << config.navigation.lineThickness << "\n\n"
         << "[navigation.waypoint]\n"
         << "enabled = " << config.navigation.waypoint.enabled << "\n"
+        << "line_mode = \"" << NavigationLineModeToString(config.navigation.waypoint.lineMode) << "\"\n"
         << "color = \"" << ColorToHex(config.navigation.waypoint.color)
         << "\"\n\n"
         << "[navigation.progression]\n"
         << "enabled = " << config.navigation.progression.enabled << "\n"
+        << "line_mode = \"" << NavigationLineModeToString(config.navigation.progression.lineMode) << "\"\n"
         << "color = \"" << ColorToHex(config.navigation.progression.color)
         << "\"\n\n"
         << "[navigation.quests]\n"
         << "enabled = " << config.navigation.quests.enabled << "\n"
+        << "line_mode = \"" << NavigationLineModeToString(config.navigation.quests.lineMode) << "\"\n"
         << "color = \"" << ColorToHex(config.navigation.quests.color)
         << "\"\n\n"
         << "[navigation.custom_levels]\n"
         << "enabled = " << config.navigation.customLevels.enabled << "\n"
+        << "line_mode = \"" << NavigationLineModeToString(config.navigation.customLevels.lineMode) << "\"\n"
         << "color = \"" << ColorToHex(config.navigation.customLevels.color)
         << "\"\n"
         << "# Edit only this destination list manually. Each entry must use\n"

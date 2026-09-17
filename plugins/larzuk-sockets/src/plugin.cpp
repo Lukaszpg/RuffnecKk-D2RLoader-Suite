@@ -1,5 +1,6 @@
 #include <D2RLPlugin/api.h>
 #include <D2RLPlugin/diagnostics.h>
+#include <RuffnecKk/native_stat_compat.hpp>
 
 #include "native_contract.hpp"
 #include "policy.hpp"
@@ -33,10 +34,6 @@ using GetMaxSocketsFn = std::uint8_t(__fastcall*)(void*) noexcept;
 using GetItemDataContextFn = std::uint8_t(__fastcall*)(void*) noexcept;
 using GetItemsTxtRecordFn = std::uint8_t*(__fastcall*)(
     std::uint8_t, std::int32_t) noexcept;
-using GetStatFn = std::int32_t(__fastcall*)(
-    void*, std::int32_t, std::uint32_t) noexcept;
-using SetUnitStatFn = void(__fastcall*)(
-    void*, std::int32_t, std::int32_t, std::uint32_t) noexcept;
 
 const D2RL::PluginContext* Context{};
 std::uint8_t* Base{};
@@ -50,8 +47,21 @@ SetItemFlagFn SetItemFlag{};
 GetMaxSocketsFn GetMaxSockets{};
 GetItemDataContextFn GetItemDataContext{};
 GetItemsTxtRecordFn GetItemsTxtRecord{};
-GetStatFn GetStat{};
-SetUnitStatFn SetUnitStat{};
+// STATLIST_GetUnitStat at 0x2F5020 and STATLIST_SetUnitStat at 0x2F7D10
+// are admitted by NativeStatCompat.
+RuffnecKk::NativeStatCompat::Adapter NativeStats{};
+
+auto NativeStatFailureLabel() noexcept -> const char* {
+    using Failure = RuffnecKk::NativeStatCompat::Failure;
+    switch (NativeStats.LastFailure()) {
+    case Failure::ReadFailed: return "memory read failed";
+    case Failure::CanonicalMismatch: return "canonical entry mismatch";
+    case Failure::ProviderEncoding: return "provider relay encoding mismatch";
+    case Failure::ProviderPointer: return "provider relay target mismatch";
+    case Failure::ProviderWitness: return "provider witness mismatch";
+    default: return "invalid compatibility contract";
+    }
+}
 
 std::atomic<std::uint64_t> ConfiguredRewards{};
 
@@ -60,7 +70,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-larzuk-sockets",
     .name = "Larzuk Sockets",
-    .version = "1.0.3",
+    .version = "1.1.0",
     .author = "RuffnecKk",
     .description =
         "Configures Larzuk socket rewards by difficulty and item quality.",
@@ -130,7 +140,8 @@ __declspec(noinline) void __fastcall HookAddSockets(
 
     void* game = LarzukCallerGame();
     if (game == nullptr
-        || GetStat(item, NativeContract::NumberOfSocketsStat, 0) > 0) {
+        || NativeStats.GetUnitStat(
+            item, NativeContract::NumberOfSocketsStat, 0) > 0) {
         OriginalAddSockets(item, vanillaSockets);
         return;
     }
@@ -171,7 +182,8 @@ __declspec(noinline) void __fastcall HookAddSockets(
     }
 
     SetItemFlag(item, NativeContract::SocketedItemFlag, 1);
-    SetUnitStat(item, NativeContract::NumberOfSocketsStat, sockets, 0);
+    NativeStats.SetUnitStat(
+        item, NativeContract::NumberOfSocketsStat, sockets, 0);
     ConfiguredRewards.fetch_add(1, std::memory_order_relaxed);
 
     if (Settings.diagnostics) {
@@ -254,6 +266,19 @@ auto ValidateNativeContract() noexcept -> bool {
     for (const auto& helper : NativeContract::Helpers) {
         if (!ValidateComposableHelper(helper)) return false;
     }
+    if (!NativeStats.BindCurrentProcess(
+        reinterpret_cast<std::uintptr_t>(Base),
+        RuffnecKk::NativeStatCompat::ToMask(
+            RuffnecKk::NativeStatCompat::Helper::GetUnitStat)
+            | RuffnecKk::NativeStatCompat::ToMask(
+                RuffnecKk::NativeStatCompat::Helper::SetUnitStat))) {
+        char message[192]{};
+        std::snprintf(message, sizeof(message),
+            "LarzukSockets: stat compatibility admission failed (%s).",
+            NativeStatFailureLabel());
+        Context->LogError(message);
+        return false;
+    }
     return true;
 }
 
@@ -266,8 +291,6 @@ auto BindNativeFunctions() noexcept -> void {
         NativeContract::Helpers[4].rva);
     GetItemsTxtRecord = At<GetItemsTxtRecordFn>(
         NativeContract::Helpers[5].rva);
-    GetStat = At<GetStatFn>(NativeContract::Helpers[6].rva);
-    SetUnitStat = At<SetUnitStatFn>(NativeContract::Helpers[7].rva);
 }
 
 auto InstallHook() noexcept -> bool {
@@ -295,8 +318,7 @@ auto ResetState() noexcept -> void {
     GetMaxSockets = nullptr;
     GetItemDataContext = nullptr;
     GetItemsTxtRecord = nullptr;
-    GetStat = nullptr;
-    SetUnitStat = nullptr;
+    NativeStats.Reset();
     Base = nullptr;
     Context = nullptr;
 }
@@ -350,12 +372,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!Settings.enabled) {
         try {
             const auto message = std::string(
-                "LarzukSockets 1.0.3 by RuffnecKk loaded disabled; no hook installed; config=")
+                "LarzukSockets 1.1.0 by RuffnecKk loaded disabled; no hook installed; config=")
                 + PathForLog(LoadedConfigPath) + ".";
             context->LogInfo(message.c_str());
         } catch (...) {
             context->LogInfo(
-                "LarzukSockets 1.0.3 by RuffnecKk loaded disabled; no hook installed.");
+                "LarzukSockets 1.1.0 by RuffnecKk loaded disabled; no hook installed.");
         }
         return true;
     }
@@ -363,12 +385,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!HasRules(Settings.rules)) {
         try {
             const auto message = std::string(
-                "LarzukSockets 1.0.3 loaded; all rules delegate to vanilla; hook not installed; config=")
+                "LarzukSockets 1.1.0 loaded; all rules delegate to vanilla; hook not installed; config=")
                 + PathForLog(LoadedConfigPath) + ".";
             context->LogInfo(message.c_str());
         } catch (...) {
             context->LogInfo(
-                "LarzukSockets 1.0.3 loaded; all rules delegate to vanilla; hook not installed.");
+                "LarzukSockets 1.1.0 loaded; all rules delegate to vanilla; hook not installed.");
         }
         return true;
     }
@@ -385,12 +407,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
 
     try {
         const auto message = std::string(
-            "LarzukSockets 1.0.3 by RuffnecKk loaded; configured hook active; config=")
+            "LarzukSockets 1.1.0 by RuffnecKk loaded; configured hook active; config=")
             + PathForLog(LoadedConfigPath) + ".";
         context->LogInfo(message.c_str());
     } catch (...) {
         context->LogInfo(
-            "LarzukSockets 1.0.3 by RuffnecKk loaded; configured hook active.");
+            "LarzukSockets 1.1.0 by RuffnecKk loaded; configured hook active.");
     }
     return true;
 }

@@ -1,9 +1,10 @@
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.28)
-    project(RuffnecKkCastTriggers VERSION 1.0.0 LANGUAGES CXX RC)
+    project(RuffnecKkCastTriggers VERSION 1.1.0 LANGUAGES CXX RC)
     include(CTest)
     option(RUFFNECKK_SUITE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
+    add_subdirectory(../../common "${CMAKE_BINARY_DIR}/_deps/common")
 else()
     enable_language(RC)
 endif()
@@ -25,6 +26,7 @@ add_library(ruffneckk_cast_triggers SHARED src/plugin.cpp src/plugin.rc)
 target_compile_features(ruffneckk_cast_triggers PRIVATE cxx_std_20)
 target_link_libraries(ruffneckk_cast_triggers PRIVATE
     D2RLPlugin::D2RLPlugin
+    RuffnecKk::NativeStatCompat
     tomlplusplus::tomlplusplus
 )
 set_target_properties(ruffneckk_cast_triggers PROPERTIES
