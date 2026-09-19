@@ -2,9 +2,8 @@
 
 
 
-The published Suite contains 23 independent plugins and 18 optional
-memory patches. You can install one component, a few favorites, or the complete
-bundles.
+Suite 1.4.1 will contain 22 independent plugins and 18 optional memory patches.
+You can install one component, a few favorites, or the complete bundles.
 
 ## Requirements
 
@@ -85,7 +84,6 @@ control.
 | Remote Stash | Opens personal and shared stash pages from anywhere. | Hotkey, Inventory button, placement, size, custom sprites, and active-MPQ skin overrides. |
 | Vendor Stock Refresh | Adds a button that refreshes vendors stock screens. | No extra options. |
 | Bulk Skill Point Allocation | Uses Ctrl+Click for a batch and Shift+Click for all usable skill points. | Batch size and confirmation text. |
-| Charm Aura Trigger Fix | Restores inventory charm auras after respawns and zone transitions | No extra options. |
 | Ethereal Item Rules | Controls which items can become ethereal and how often. | Chance, excluded item types, Set items, and Indestructible items. |
 | Item Durability | Adjusts durability loss and can give bows durability. | Loss resistance, ethereal durability, and bow durability. |
 | Larzuk Sockets | Allows tweaking Larzuk's socket reward by difficulty and item quality. | Minimum and maximum sockets rewarded (by quality). |

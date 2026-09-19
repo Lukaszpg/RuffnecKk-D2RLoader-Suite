@@ -153,10 +153,10 @@ Assert-Policy (-not $plugin.Contains('only D2R builds')) `
     'compatibility refusal must be based on the native fingerprint, not named builds'
 Assert-Policy ($plugin -match 'validating the complete native fingerprint') `
     'the observed build name must remain diagnostic while the full fingerprint is checked'
-Assert-Policy ($plugin -match '\.version\s*=\s*"1\.5\.0"') `
-    'the plugin metadata must identify the stat compatibility update as 1.5.0'
-Assert-Policy ($resource -match 'FILEVERSION\s+1,5,0,0') `
-    'the Windows file version must identify the stat compatibility update as 1.5.0'
+Assert-Policy ($plugin -match '\.version\s*=\s*"1\.5\.1"') `
+    'the plugin metadata must identify the Suite 1.4.1 compatibility update as 1.5.1'
+Assert-Policy ($resource -match 'FILEVERSION\s+1,5,1,0') `
+    'the Windows file version must identify the Suite 1.4.1 compatibility update as 1.5.1'
 Assert-Policy ($plugin -match 'GetModuleHandleW\(\s*L"d2rl-ruffneckk-mapsense\.dll"\)') `
     'the renderer handoff must resolve the canonical public MapSense module name'
 Assert-Policy ($plugin -match 'GetModuleHandleW\(L"RuffnecKkMapSense\.dll"\)') `

@@ -1,11 +1,13 @@
 #include "policy.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace {
 auto Require(bool value, const char* expression, int line) -> bool {
@@ -16,6 +18,16 @@ auto Require(bool value, const char* expression, int line) -> bool {
 }
 
 #define REQUIRE(value) do { if (!Require((value), #value, __LINE__)) return 1; } while (false)
+
+auto ReadAll(const char* path) -> std::string {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.good()) return {};
+    std::ostringstream stream;
+    stream << file.rdbuf();
+    auto text = stream.str();
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+}
 
 int main(int argc, char** argv) {
     using namespace RuffnecKk::EtherealItemRules;
@@ -46,14 +58,12 @@ int main(int argc, char** argv) {
     REQUIRE(FindItemTypeId(nullptr, records.size(), sizeof(Record), belt) == -1);
     REQUIRE(FindItemTypeId(records.data(), 4097, sizeof(Record), belt) == -1);
 
-    REQUIRE(argc == 2);
-    std::ifstream file(argv[1], std::ios::binary);
-    REQUIRE(file.good());
-    std::ostringstream stream;
-    stream << file.rdbuf();
+    REQUIRE(argc == 3);
+    const auto configText = ReadAll(argv[1]);
+    REQUIRE(!configText.empty());
     Config config{};
     std::string error;
-    REQUIRE(ParseConfig(stream.str(), config, error));
+    REQUIRE(ParseConfig(configText, config, error));
     REQUIRE(config.enabled);
     REQUIRE(!config.exclusions.enabled);
     REQUIRE(config.exclusions.itemTypeCount == 0);
@@ -133,5 +143,110 @@ enabled = true
         "[exclusions]\nenabled=false\nitem_types=[]\n",
         config,
         error));
+
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Disabled, ExclusionState::Pending));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Disabled, ExclusionState::Refused));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Pending, ExclusionState::Installing));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Installing, ExclusionState::Stopping));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Installing, ExclusionState::Active));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Installing, ExclusionState::Refused));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Active, ExclusionState::Stopping));
+    REQUIRE(IsValidExclusionTransition(
+        ExclusionState::Refused, ExclusionState::Stopping));
+    REQUIRE(!IsValidExclusionTransition(
+        ExclusionState::Refused, ExclusionState::Installing));
+    REQUIRE(!IsValidExclusionTransition(
+        ExclusionState::Stopping, ExclusionState::Active));
+    REQUIRE(!IsExclusionHookActive(ExclusionState::Disabled));
+    REQUIRE(!IsExclusionHookActive(ExclusionState::Pending));
+    REQUIRE(!IsExclusionHookActive(ExclusionState::Installing));
+    REQUIRE(IsExclusionHookActive(ExclusionState::Active));
+    REQUIRE(!IsExclusionHookActive(ExclusionState::Refused));
+    REQUIRE(!IsExclusionHookActive(ExclusionState::Stopping));
+
+    const auto source = ReadAll(argv[2]);
+    REQUIRE(!source.empty());
+    REQUIRE(source.find("ExclusionState::Pending") != std::string::npos);
+    REQUIRE(source.find("ExclusionState::Installing") != std::string::npos);
+    REQUIRE(source.find("ExclusionState::Active") != std::string::npos);
+    REQUIRE(source.find("ExclusionState::Refused") != std::string::npos);
+    REQUIRE(source.find("ExclusionState::Stopping") != std::string::npos);
+    REQUIRE(source.find("registerDataTablesLoadedListener") != std::string::npos);
+    REQUIRE(source.find("unregisterDataTablesLoadedListener") != std::string::npos);
+
+    const auto load = source.find("D2RLoaderLoadPlugin");
+    const auto loadEnd = source.find("D2RLoaderUnloadPlugin", load);
+    const auto registration = source.find(
+        "RegisterExclusionLifecycle()", load);
+    const auto validation = source.find("if (!ValidateRuntime())", load);
+    const auto rulePatches = source.find("InstallRulePatches()", load);
+    REQUIRE(load != std::string::npos);
+    REQUIRE(loadEnd != std::string::npos);
+    REQUIRE(validation > load && validation < loadEnd);
+    REQUIRE(registration > validation && registration < loadEnd);
+    REQUIRE(rulePatches > registration && rulePatches < loadEnd);
+    REQUIRE(source.find("InstallExclusionHook()", load) == std::string::npos);
+    const auto patchFailure = source.find(
+        "if (!InstallRulePatches())", load);
+    REQUIRE(patchFailure != std::string::npos);
+    const auto patchFailureCleanup = source.find(
+        "UnregisterExclusionListener()", patchFailure);
+    REQUIRE(patchFailureCleanup > patchFailure && patchFailureCleanup < loadEnd);
+    const auto unloadCleanup = source.find(
+        "UnregisterExclusionListener()", loadEnd);
+    const auto unloadReset = source.find("ResetState()", loadEnd);
+    REQUIRE(unloadReset != std::string::npos);
+    REQUIRE(unloadCleanup > loadEnd && unloadCleanup < unloadReset);
+
+    const auto validationDefinition = source.find("auto ValidateRuntime()");
+    REQUIRE(validationDefinition != std::string::npos);
+    const auto validationEnd = source.find(
+        "auto ShouldLogDiagnostic", validationDefinition);
+    REQUIRE(validationEnd != std::string::npos);
+    const auto validationBody = std::string_view(
+        source.data() + validationDefinition,
+        validationEnd - validationDefinition);
+    REQUIRE(validationBody.find("CheckItemTypeRva") == std::string_view::npos);
+    const auto callback = source.find("void __cdecl OnDataTablesLoaded(");
+    REQUIRE(callback != std::string::npos);
+    const auto callbackClaim = source.find(
+        "TryTransitionExclusionState(", callback);
+    const auto callbackContract = source.find("context != Context", callback);
+    REQUIRE(callbackClaim != std::string::npos);
+    REQUIRE(callbackContract > callbackClaim);
+    const auto callbackEnd = source.find(
+        "auto RegisterExclusionLifecycle()", callback);
+    REQUIRE(callbackEnd > callback);
+    const auto callbackCleanup = source.find(
+        "UnregisterExclusionListener()", callback);
+    REQUIRE(callbackCleanup == std::string::npos || callbackCleanup >= callbackEnd);
+    REQUIRE(source.find("event->revision == 0", callback) != std::string::npos);
+    REQUIRE(source.find("CheckItemTypeRva", callback) != std::string::npos);
+    REQUIRE(source.find("InstallExclusionHook()", callback) != std::string::npos);
+    const auto hook = source.find(
+        "std::int32_t __fastcall HookCheckItemType(");
+    const auto hookReturn = source.find("returnRva", hook);
+    const auto hookGate = source.find("IsExclusionHookActive", hook);
+    REQUIRE(hook != std::string::npos);
+    REQUIRE(hookGate > hook && hookGate < hookReturn);
+    REQUIRE(hookReturn > hook);
+    REQUIRE(source.find("TryTransitionExclusionState", callback)
+        != std::string::npos);
+    REQUIRE(source.find("ExclusionLifecycleMutex", callback)
+        != std::string::npos);
+    REQUIRE(source.find("StopExclusions()", loadEnd)
+        != std::string::npos);
+    REQUIRE(source.find(
+        "StopExclusions();\n"
+        "        }\n"
+        "        UnregisterExclusionListener();",
+        loadEnd) != std::string::npos);
     return 0;
 }

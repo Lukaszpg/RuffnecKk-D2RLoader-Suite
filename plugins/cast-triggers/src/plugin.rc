@@ -4,8 +4,13 @@
 D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN_API_VERSION) }
 
 1 VERSIONINFO
-FILEVERSION 1,1,0,0
-PRODUCTVERSION 1,1,0,0
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
+#else
+FILEVERSION 1,1,1,0
+PRODUCTVERSION 1,1,1,0
+#endif
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -13,11 +18,19 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "RuffnecKk"
       VALUE "FileDescription", "Triggers item skills from spells, attack attempts, and combat outcomes."
-      VALUE "FileVersion", "1.1.0"
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+      VALUE "FileVersion", "1.0.2"
+#else
+      VALUE "FileVersion", "1.1.1"
+#endif
       VALUE "InternalName", "cast-triggers"
       VALUE "OriginalFilename", "d2rl-ruffneckk-cast-triggers.dll"
       VALUE "ProductName", "Cast Triggers"
-      VALUE "ProductVersion", "1.1.0"
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+      VALUE "ProductVersion", "1.0.2"
+#else
+      VALUE "ProductVersion", "1.1.1"
+#endif
     END
   END
   BLOCK "VarFileInfo"

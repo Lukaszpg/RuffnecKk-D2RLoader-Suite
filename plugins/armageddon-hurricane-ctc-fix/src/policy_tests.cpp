@@ -26,6 +26,16 @@ int main() {
     static_assert(!ShouldEraseExpiredSeedAfterActive(0, true));
     static_assert(!ShouldEraseExpiredSeedAfterActive(1, false));
 
+    static_assert(SelectSharedStartLoadMode(
+        RuffnecKk::TrackedNativeTransform::Admission::Pristine)
+        == SharedStartLoadMode::InstallHooks);
+    static_assert(SelectSharedStartLoadMode(
+        RuffnecKk::TrackedNativeTransform::Admission::TrackedCompatible)
+        == SharedStartLoadMode::CompatibilityInactive);
+    static_assert(SelectSharedStartLoadMode(
+        RuffnecKk::TrackedNativeTransform::Admission::Rejected)
+        == SharedStartLoadMode::Refuse);
+
     const std::array<std::uint8_t, 5> expectedFingerprint{
         0x48, 0x89, 0x5C, 0x24, 0x10};
     auto matchingFingerprint = expectedFingerprint;
@@ -101,6 +111,10 @@ enabled = true
     assert(source.find("D2RL::PluginFlags::Server") != std::string::npos);
     assert(source.find("0x589930") != std::string::npos);
     assert(source.find("0x575DE0") != std::string::npos);
+    assert(source.find("celestialrayone.armageddon-aura")
+        != std::string::npos);
+    assert(source.find("TrackedNativeTransform::ObserveD2RL")
+        != std::string::npos);
     assert(source.find("0x574E90") != std::string::npos);
     assert(source.find("0x3351B0") != std::string::npos);
     assert(source.find("SkillsItemEffectOffset = 0x20A")

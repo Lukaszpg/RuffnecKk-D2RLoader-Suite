@@ -1,5 +1,6 @@
 #include "d3d12_imgui_host.hpp"
 #include "d3d12_gpu_diagnostics.hpp"
+#include "d3d12_renderer_discovery_policy.hpp"
 #include "automap_sprite_package.hpp"
 #include "ui_localization.hpp"
 #include "localized_fonts.hpp"
@@ -88,6 +89,9 @@ using D3D12CreateDeviceFn = HRESULT(WINAPI*)(
     IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
 
 constexpr std::size_t MethodCount = 150;
+constexpr std::size_t SwapChainMethodTableOffset = 132;
+constexpr std::size_t SwapChainPresentVtableSlot = 8;
+constexpr std::size_t SwapChainResizeBuffersVtableSlot = 13;
 constexpr std::size_t PresentMethod = 140;
 constexpr std::size_t ResizeBuffersMethod = 145;
 constexpr std::size_t FactoryMethodCount = 25;
@@ -98,10 +102,17 @@ constexpr std::size_t CreateSwapChainForCompositionMethod = 24;
 constexpr DWORD FenceWaitMilliseconds = 5'000;
 constexpr std::size_t MaximumExternalClients = 8;
 constexpr std::size_t MaximumSwapChainQueueBindings = 16;
+constexpr std::size_t MaximumRealSwapChainCandidates = 4;
 constexpr UINT MapSenseSrvDescriptorCount = 4U;
 constexpr UINT PrimeMhChestSrvDescriptorIndex = 1U;
 constexpr UINT PrimeMhSuperChestSrvDescriptorIndex = 2U;
 constexpr UINT AutomapSpriteSrvDescriptorIndex = 3U;
+
+static_assert(
+    PresentMethod == SwapChainMethodTableOffset + SwapChainPresentVtableSlot);
+static_assert(
+    ResizeBuffersMethod
+    == SwapChainMethodTableOffset + SwapChainResizeBuffersVtableSlot);
 
 [[nodiscard]] auto WaitForFenceValueLocked(
     std::uint64_t value) noexcept -> bool;
@@ -401,6 +412,12 @@ HWND GameWindow{};
 IDXGISwapChain3* ActiveSwapChain{};
 DXGI_FORMAT BackBufferFormat{DXGI_FORMAT_R8G8B8A8_UNORM};
 
+enum class RendererMethodTargetSource {
+    None,
+    CompositionProbe,
+    CapturedRealSwapChain,
+};
+
 struct SwapChainQueueBinding {
     ComPtr<IUnknown> swapChainIdentity;
     ComPtr<ID3D12CommandQueue> commandQueue;
@@ -453,6 +470,18 @@ std::atomic<ID3D12CommandQueue*> CapturedQueue{};
 std::atomic<bool> UnboundSwapChainWarningLogged{};
 std::atomic<bool> DeviceRemovalWarningLogged{};
 std::atomic<bool> PresentDiscoveryWaitingLogged{};
+std::atomic<bool> CompositionProbeFailureLogged{};
+std::atomic<bool> RealSwapChainFallbackLogged{};
+std::atomic<bool> RealSwapChainReplacementLogged{};
+std::atomic<bool> RealSwapChainCandidateConflictLogged{};
+std::atomic<bool> RealSwapChainSelectedConflictLogged{};
+std::atomic<bool> RealSwapChainQueryFailureLogged{};
+std::atomic<bool> RealSwapChainInvalidPairLogged{};
+std::atomic<bool> ProbeRealMismatchLogged{};
+std::atomic<bool> WrappedQueueDeviceInfoLogged{};
+std::atomic<bool> TransientMinHookInstallFailureLogged{};
+std::atomic<bool> PermanentMinHookInstallFailureLogged{};
+std::atomic<bool> PermanentMinHookInstallFailure{};
 std::atomic<bool> MenuOpen{};
 std::atomic<bool> AwaitingFirstBounds{};
 std::atomic<std::uint32_t> OwnedMouseButtons{};
@@ -489,6 +518,26 @@ std::atomic<bool> AutomapSpriteAtlasReadyPublished{};
 std::atomic<bool> ConfiguredPublished{};
 std::atomic<D3D12ImGuiLogCallback> InfoLogger{};
 std::atomic<D3D12ImGuiLogCallback> WarningLogger{};
+
+struct RealSwapChainCandidate {
+    HWND window{};
+    ComPtr<IUnknown> swapChainIdentity;
+    Detail::RendererMethodPair methods{};
+    bool conflicted{};
+    bool replacesElectedSameWindow{};
+    std::uint64_t generation{};
+};
+
+std::array<RealSwapChainCandidate, MaximumRealSwapChainCandidates>
+    RealSwapChainCandidates{};
+constexpr std::size_t NoRealSwapChainCandidate = MaximumRealSwapChainCandidates;
+std::size_t SelectedRealSwapChainCandidate{NoRealSwapChainCandidate};
+std::uint64_t NextRealSwapChainCandidateGeneration{1U};
+Detail::RendererMethodPair QualifiedForegroundRealSwapChainMethods{};
+bool SelectedRealSwapChainMethodsConflicted{};
+Detail::RendererMethodPair InstalledRendererMethods{};
+RendererMethodTargetSource InstalledRendererMethodSource{
+    RendererMethodTargetSource::None};
 
 void LogInfo(const char* message) noexcept;
 
@@ -2044,9 +2093,282 @@ auto SameComIdentity(IUnknown* left, IUnknown* right) noexcept -> bool {
         && leftIdentity.Get() == rightIdentity.Get();
 }
 
+auto IsProcessMainWindowCandidate(HWND window) noexcept -> bool {
+    if (window == nullptr || !IsWindow(window)) return false;
+    DWORD processId{};
+    if (GetWindowThreadProcessId(window, &processId) == 0U
+        || processId != GetCurrentProcessId()
+        || GetAncestor(window, GA_ROOT) != window
+        || GetWindow(window, GW_OWNER) != nullptr) {
+        return false;
+    }
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    return (style & WS_CHILD) == 0;
+}
+
+auto IsForegroundProcessMainWindowCandidate(HWND window) noexcept -> bool {
+    return GetForegroundWindow() == window
+        && IsProcessMainWindowCandidate(window);
+}
+
+void PoisonRendererForMethodTargetMismatchLocked(
+    const char* message) noexcept {
+    SelectedRealSwapChainMethodsConflicted = true;
+    RendererPoisoned = true;
+    RendererInitializedPublished.store(false, std::memory_order_release);
+    if (!ProbeRealMismatchLogged.exchange(
+            true, std::memory_order_acq_rel)) {
+        LogWarning(message);
+    }
+}
+
+void PoisonRendererForSelectedRealSwapChainConflictLocked() noexcept {
+    SelectedRealSwapChainMethodsConflicted = true;
+    RendererPoisoned = true;
+    RendererInitializedPublished.store(false, std::memory_order_release);
+    if (!RealSwapChainSelectedConflictLogged.exchange(
+            true, std::memory_order_acq_rel)) {
+        LogWarning(
+            "MapSense: the elected real swap-chain identity reported conflicting renderer targets; MapSense GPU submission is fail-closed.");
+    }
+}
+
+auto FindRealSwapChainCandidateLocked(
+    IUnknown* swapChainIdentity,
+    HWND window) noexcept -> std::size_t {
+    for (std::size_t index = 0U; index < RealSwapChainCandidates.size(); ++index) {
+        const auto& candidate = RealSwapChainCandidates[index];
+        if (candidate.window == window && SameComIdentity(
+                candidate.swapChainIdentity.Get(), swapChainIdentity)) {
+            return index;
+        }
+    }
+    return NoRealSwapChainCandidate;
+}
+
+auto ReserveRealSwapChainCandidateLocked(
+    IUnknown* swapChainIdentity,
+    HWND window) noexcept -> std::size_t {
+    const auto existing = FindRealSwapChainCandidateLocked(
+        swapChainIdentity, window);
+    if (existing != NoRealSwapChainCandidate) return existing;
+    bool replacesElectedSameWindow{};
+    if (SelectedRealSwapChainCandidate != NoRealSwapChainCandidate) {
+        const auto& selected = RealSwapChainCandidates[
+            SelectedRealSwapChainCandidate];
+        if (selected.window == window
+            && !SameComIdentity(
+                selected.swapChainIdentity.Get(), swapChainIdentity)
+            && !RendererPoisoned) {
+            // A new same-HWND object supersedes the elected object. Preserve
+            // the installed method hooks, but require its first eligible
+            // Present to elect the replacement identity and initialize anew.
+            // The old physical HWND subclass may still be installed. Preserve
+            // its tracking so shutdown can remove it rather than forgetting
+            // the subclass while the same HWND remains in use.
+            ResetRendererStateLocked(false);
+            SelectedRealSwapChainCandidate = NoRealSwapChainCandidate;
+            SelectedRealSwapChainMethodsConflicted = false;
+            QualifiedForegroundRealSwapChainMethods = {};
+            replacesElectedSameWindow = true;
+            if (!RealSwapChainReplacementLogged.exchange(
+                    true, std::memory_order_acq_rel)) {
+                LogInfo(
+                    "MapSense: observed a same-window swap-chain replacement; awaiting its eligible Present before reinitializing the renderer.");
+            }
+        }
+    }
+    std::size_t replacement = NoRealSwapChainCandidate;
+    for (std::size_t index = 0U; index < RealSwapChainCandidates.size(); ++index) {
+        const auto& candidate = RealSwapChainCandidates[index];
+        if (candidate.swapChainIdentity == nullptr) {
+            replacement = index;
+            break;
+        }
+        if (index != SelectedRealSwapChainCandidate && candidate.window == window
+            && (replacement == NoRealSwapChainCandidate
+                || candidate.generation < RealSwapChainCandidates[
+                    replacement].generation)) {
+            replacement = index;
+        }
+    }
+    if (replacement == NoRealSwapChainCandidate) {
+        for (std::size_t index = 0U;
+             index < RealSwapChainCandidates.size(); ++index) {
+            const auto& candidate = RealSwapChainCandidates[index];
+            if (index == SelectedRealSwapChainCandidate) continue;
+            if (replacement == NoRealSwapChainCandidate
+                || candidate.generation < RealSwapChainCandidates[
+                    replacement].generation) {
+                replacement = index;
+            }
+        }
+    }
+    if (replacement == NoRealSwapChainCandidate) return replacement;
+
+    auto& candidate = RealSwapChainCandidates[replacement];
+    candidate = {};
+    candidate.window = window;
+    candidate.replacesElectedSameWindow = replacesElectedSameWindow;
+    candidate.generation = NextRealSwapChainCandidateGeneration;
+    if (NextRealSwapChainCandidateGeneration
+        != std::numeric_limits<std::uint64_t>::max()) {
+        ++NextRealSwapChainCandidateGeneration;
+    }
+    if (FAILED(swapChainIdentity->QueryInterface(
+            IID_PPV_ARGS(&candidate.swapChainIdentity)))) {
+        candidate = {};
+        return NoRealSwapChainCandidate;
+    }
+    return replacement;
+}
+
+auto SelectRealSwapChainCandidateLocked(
+    IDXGISwapChain3* presentedSwapChain) noexcept -> bool {
+    if (SelectedRealSwapChainCandidate != NoRealSwapChainCandidate) {
+        const auto& selected = RealSwapChainCandidates[
+            SelectedRealSwapChainCandidate];
+        return !selected.conflicted
+            && Detail::IsCompleteRendererMethodPair(selected.methods)
+            && SameComIdentity(
+                selected.swapChainIdentity.Get(), presentedSwapChain);
+    }
+    for (std::size_t index = 0U; index < RealSwapChainCandidates.size(); ++index) {
+        const auto& candidate = RealSwapChainCandidates[index];
+        if (!IsForegroundProcessMainWindowCandidate(candidate.window)
+            || !SameComIdentity(
+                candidate.swapChainIdentity.Get(), presentedSwapChain)) {
+            continue;
+        }
+        if (candidate.conflicted
+            || !Detail::IsCompleteRendererMethodPair(candidate.methods)) {
+            return false;
+        }
+        SelectedRealSwapChainCandidate = index;
+        QualifiedForegroundRealSwapChainMethods = candidate.methods;
+        SelectedRealSwapChainMethodsConflicted = false;
+        if (Detail::ReconcileRendererMethodPair(
+                InstalledRendererMethods, candidate.methods)
+            == Detail::RendererMethodReconciliation::Mismatch) {
+            PoisonRendererForMethodTargetMismatchLocked(
+                "MapSense: the elected real swap-chain targets differ from the installed renderer targets; MapSense GPU submission is fail-closed.");
+            return false;
+        }
+        return !RendererPoisoned;
+    }
+    return false;
+}
+
+void RefreshForegroundRealSwapChainMethodQualificationLocked() noexcept {
+    QualifiedForegroundRealSwapChainMethods = {};
+    if (SelectedRealSwapChainCandidate != NoRealSwapChainCandidate) {
+        const auto& selected = RealSwapChainCandidates[
+            SelectedRealSwapChainCandidate];
+        if (!selected.conflicted
+            && Detail::IsCompleteRendererMethodPair(selected.methods)) {
+            QualifiedForegroundRealSwapChainMethods = selected.methods;
+            if (Detail::ReconcileRendererMethodPair(
+                    InstalledRendererMethods, selected.methods)
+                == Detail::RendererMethodReconciliation::Mismatch) {
+                PoisonRendererForMethodTargetMismatchLocked(
+                    "MapSense: the elected real swap-chain targets differ from the installed renderer targets; MapSense GPU submission is fail-closed.");
+            }
+        }
+        return;
+    }
+
+    std::array<Detail::RendererCandidateLifecycle,
+        MaximumRealSwapChainCandidates> lifecycle{};
+    for (std::size_t index = 0U; index < RealSwapChainCandidates.size(); ++index) {
+        const auto& candidate = RealSwapChainCandidates[index];
+        lifecycle[index] = {
+            .live = IsProcessMainWindowCandidate(candidate.window),
+            .foreground = IsForegroundProcessMainWindowCandidate(
+                candidate.window),
+            .conflicted = candidate.conflicted,
+            .generation = candidate.generation,
+            .methods = candidate.methods,
+        };
+    }
+    const std::size_t qualified = Detail::SelectNewestQualifiedRendererCandidate(
+        lifecycle.data(), lifecycle.size());
+    if (qualified == Detail::NoRendererCandidate) return;
+
+    const auto& candidate = RealSwapChainCandidates[qualified];
+    QualifiedForegroundRealSwapChainMethods = candidate.methods;
+    if (Detail::ReconcileRendererMethodPair(
+            InstalledRendererMethods, candidate.methods)
+        == Detail::RendererMethodReconciliation::Mismatch) {
+        PoisonRendererForMethodTargetMismatchLocked(
+            "MapSense: newly qualified foreground real swap-chain targets differ from the installed renderer targets; MapSense GPU submission is fail-closed.");
+    }
+}
+
+void CaptureRealSwapChainMethodsLocked(
+    IDXGISwapChain3* swapChain,
+    IUnknown* swapChainIdentity,
+    HWND windowCandidate) noexcept {
+    if (swapChain == nullptr || swapChainIdentity == nullptr
+        || !IsProcessMainWindowCandidate(windowCandidate)) {
+        return;
+    }
+    const auto index = ReserveRealSwapChainCandidateLocked(
+        swapChainIdentity, windowCandidate);
+    if (index == NoRealSwapChainCandidate) return;
+    auto& candidate = RealSwapChainCandidates[index];
+    auto** const methods = *reinterpret_cast<void***>(swapChain);
+    if (methods == nullptr) return;
+    const Detail::RendererMethodPair incoming{
+        .present = methods[SwapChainPresentVtableSlot],
+        .resizeBuffers = methods[SwapChainResizeBuffersVtableSlot],
+    };
+    switch (Detail::CaptureRendererMethodPair(
+        candidate.methods, incoming)) {
+    case Detail::RendererMethodPairCapture::Accepted:
+        candidate.methods = incoming;
+        if (Detail::ReconcileReplacementRendererMethodPair(
+                candidate.replacesElectedSameWindow,
+                InstalledRendererMethods,
+                incoming) == Detail::RendererMethodReconciliation::Mismatch) {
+            PoisonRendererForMethodTargetMismatchLocked(
+                "MapSense: a same-window replacement swap-chain target differs from the installed renderer target; MapSense GPU submission is fail-closed.");
+            return;
+        }
+        LogInfo("MapSense: retained bounded direct-queue swap-chain targets for later foreground method qualification.");
+        return;
+    case Detail::RendererMethodPairCapture::Duplicate:
+        if (Detail::ReconcileReplacementRendererMethodPair(
+                candidate.replacesElectedSameWindow,
+                InstalledRendererMethods,
+                incoming) == Detail::RendererMethodReconciliation::Mismatch) {
+            PoisonRendererForMethodTargetMismatchLocked(
+                "MapSense: a same-window replacement swap-chain target differs from the installed renderer target; MapSense GPU submission is fail-closed.");
+        }
+        return;
+    case Detail::RendererMethodPairCapture::Conflict:
+        candidate.conflicted = true;
+        if (SelectedRealSwapChainCandidate == index) {
+            PoisonRendererForSelectedRealSwapChainConflictLocked();
+        } else if (!RealSwapChainCandidateConflictLogged.exchange(
+                       true, std::memory_order_acq_rel)) {
+            LogWarning(
+                "MapSense: a bounded swap-chain candidate reported conflicting renderer targets and was excluded from real-target qualification.");
+        }
+        return;
+    case Detail::RendererMethodPairCapture::Invalid:
+        if (!RealSwapChainInvalidPairLogged.exchange(
+                true, std::memory_order_acq_rel)) {
+            LogWarning(
+                "MapSense: real swap-chain renderer target capture was incomplete; fallback remains unavailable.");
+        }
+        return;
+    }
+}
+
 void RecordExactSwapChainQueue(
     IUnknown* queueCandidate,
-    IUnknown* swapChainCandidate) noexcept {
+    IUnknown* swapChainCandidate,
+    HWND windowCandidate) noexcept {
     if (queueCandidate == nullptr || swapChainCandidate == nullptr) return;
 
     ComPtr<ID3D12CommandQueue> queue;
@@ -2059,6 +2381,17 @@ void RecordExactSwapChainQueue(
     }
 
     std::scoped_lock lock(HostMutex);
+    ComPtr<IDXGISwapChain3> swapChain3;
+    if (SUCCEEDED(swapChainCandidate->QueryInterface(
+            IID_PPV_ARGS(&swapChain3)))) {
+        CaptureRealSwapChainMethodsLocked(
+            swapChain3.Get(), swapChainIdentity.Get(), windowCandidate);
+    } else if (IsProcessMainWindowCandidate(windowCandidate)
+        && !RealSwapChainQueryFailureLogged.exchange(
+                   true, std::memory_order_acq_rel)) {
+        LogWarning(
+            "MapSense: exact direct-queue swap chain did not expose IDXGISwapChain3; real-target fallback remains unavailable.");
+    }
     for (auto& binding : SwapChainQueueBindings) {
         if (!SameComIdentity(
                 binding.swapChainIdentity.Get(), swapChainIdentity.Get())) {
@@ -2127,7 +2460,9 @@ auto STDMETHODCALLTYPE HookCreateSwapChain(
         ? original(factory, queue, description, swapChain)
         : DXGI_ERROR_INVALID_CALL;
     if (SUCCEEDED(result) && swapChain != nullptr && *swapChain != nullptr)
-        RecordExactSwapChainQueue(queue, *swapChain);
+        RecordExactSwapChainQueue(queue,
+            *swapChain,
+            description != nullptr ? description->OutputWindow : nullptr);
     return result;
 }
 
@@ -2156,7 +2491,7 @@ auto STDMETHODCALLTYPE HookCreateSwapChainForHwnd(
             swapChain)
         : DXGI_ERROR_INVALID_CALL;
     if (SUCCEEDED(result) && swapChain != nullptr && *swapChain != nullptr)
-        RecordExactSwapChainQueue(queue, *swapChain);
+        RecordExactSwapChainQueue(queue, *swapChain, window);
     return result;
 }
 
@@ -2183,7 +2518,7 @@ auto STDMETHODCALLTYPE HookCreateSwapChainForCoreWindow(
             swapChain)
         : DXGI_ERROR_INVALID_CALL;
     if (SUCCEEDED(result) && swapChain != nullptr && *swapChain != nullptr)
-        RecordExactSwapChainQueue(queue, *swapChain);
+        RecordExactSwapChainQueue(queue, *swapChain, nullptr);
     return result;
 }
 
@@ -2208,7 +2543,7 @@ auto STDMETHODCALLTYPE HookCreateSwapChainForComposition(
             swapChain)
         : DXGI_ERROR_INVALID_CALL;
     if (SUCCEEDED(result) && swapChain != nullptr && *swapChain != nullptr)
-        RecordExactSwapChainQueue(queue, *swapChain);
+        RecordExactSwapChainQueue(queue, *swapChain, nullptr);
     return result;
 }
 
@@ -2218,9 +2553,9 @@ auto InitializeRenderer(
         externalClients) noexcept -> bool {
     RendererInitAttempts.fetch_add(1, std::memory_order_relaxed);
     try {
-        ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12Device> swapChainDevice;
         if (!swapChain
-            || FAILED(swapChain->GetDevice(IID_PPV_ARGS(&device)))) {
+            || FAILED(swapChain->GetDevice(IID_PPV_ARGS(&swapChainDevice)))) {
             return FailRendererInitialization(
                 1,
                 "MapSense: renderer initialization failed at swap-chain device lookup.");
@@ -2229,21 +2564,34 @@ auto InitializeRenderer(
         DXGI_SWAP_CHAIN_DESC swapDesc{};
         if (FAILED(swapChain->GetDesc(&swapDesc))
             || swapDesc.BufferCount == 0U
-            || !swapDesc.OutputWindow) {
+            || !swapDesc.OutputWindow
+            || SelectedRealSwapChainCandidate == NoRealSwapChainCandidate
+            || swapDesc.OutputWindow != RealSwapChainCandidates[
+                SelectedRealSwapChainCandidate].window) {
             return FailRendererInitialization(
                 2,
-                "MapSense: renderer initialization rejected a swap chain without D2R's OutputWindow.");
+                "MapSense: renderer initialization rejected a swap chain without the selected bounded window candidate.");
         }
 
         ComPtr<ID3D12Device> queueDevice;
-        if (!CommandQueue
-            || FAILED(CommandQueue->GetDevice(IID_PPV_ARGS(&queueDevice)))
-            || !SameComIdentity(queueDevice.Get(), device.Get())) {
+        const bool queueDeviceAvailable = CommandQueue
+            && SUCCEEDED(CommandQueue->GetDevice(
+                IID_PPV_ARGS(&queueDevice)))
+            && queueDevice != nullptr;
+        const bool sameDeviceIdentity = queueDeviceAvailable
+            && SameComIdentity(queueDevice.Get(), swapChainDevice.Get());
+        const auto deviceSelection = Detail::SelectRendererDevice(
+            true,
+            queueDeviceAvailable,
+            swapChainDevice != nullptr,
+            sameDeviceIdentity);
+        if (deviceSelection == Detail::RendererDeviceSelection::Rejected) {
             RendererPoisoned = true;
             return FailRendererInitialization(
                 3,
-                "MapSense: exact swap-chain command queue does not belong to the swap-chain device; GPU rendering is disabled.");
+                "MapSense: exact swap-chain command queue has no usable queue or swap-chain device; GPU rendering is disabled.");
         }
+        ComPtr<ID3D12Device> device = queueDevice;
 
         GameWindow = swapDesc.OutputWindow;
         PublishedGameWindow.store(GameWindow, std::memory_order_release);
@@ -2256,6 +2604,13 @@ auto InitializeRenderer(
         srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srvDesc.NumDescriptors = MapSenseSrvDescriptorCount;
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (deviceSelection
+                == Detail::RendererDeviceSelection::ExactCreationQueue
+            && !WrappedQueueDeviceInfoLogged.exchange(
+                true, std::memory_order_acq_rel)) {
+            LogInfo(
+                "MapSense: accepted the exact creation-time swap-chain command queue across distinct COM device wrappers after both device lookups succeeded.");
+        }
         if (FAILED(device->CreateDescriptorHeap(
                 &srvDesc,
                 IID_PPV_ARGS(&SrvHeap)))) {
@@ -2715,6 +3070,7 @@ auto STDMETHODCALLTYPE HookPresent(
             if (wantsFrame
                 && (!RendererInitialized
                     || ActiveSwapChain == swapChain)
+                && SelectRealSwapChainCandidateLocked(swapChain)
                 && SelectExactSwapChainQueueLocked(swapChain)) {
                 if (!RendererInitialized) {
                     InitializeRenderer(swapChain, externalClients);
@@ -2806,9 +3162,46 @@ auto BuildFactoryMethodTable() noexcept -> bool {
     return true;
 }
 
-auto BuildMethodTableWithoutWindow() noexcept -> bool {
+enum class CompositionProbeStage {
+    D3D12Resolve,
+    Factory,
+    Device,
+    Queue,
+    Allocator,
+    CommandList,
+    SwapChain,
+    SwapChain3,
+};
+
+struct CompositionProbeResult {
+    CompositionProbeStage stage{CompositionProbeStage::D3D12Resolve};
+    HRESULT result{E_FAIL};
+};
+
+[[nodiscard]] auto CompositionProbeStageName(
+    CompositionProbeStage stage) noexcept -> const char* {
+    switch (stage) {
+    case CompositionProbeStage::D3D12Resolve: return "d3d12-resolve";
+    case CompositionProbeStage::Factory: return "factory";
+    case CompositionProbeStage::Device: return "device";
+    case CompositionProbeStage::Queue: return "queue";
+    case CompositionProbeStage::Allocator: return "allocator";
+    case CompositionProbeStage::CommandList: return "command-list";
+    case CompositionProbeStage::SwapChain: return "composition-swap-chain";
+    case CompositionProbeStage::SwapChain3: return "swap-chain3";
+    }
+    return "unknown";
+}
+
+auto BuildMethodTableWithoutWindow(
+    CompositionProbeResult* probeResult) noexcept -> bool {
+    if (probeResult == nullptr) return false;
     const auto createDevice = ResolveD3D12CreateDevice();
-    if (!createDevice) return false;
+    if (!createDevice) {
+        probeResult->stage = CompositionProbeStage::D3D12Resolve;
+        probeResult->result = HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+        return false;
+    }
 
     ComPtr<IDXGIFactory2> factory;
     ComPtr<ID3D12Device> device;
@@ -2818,31 +3211,48 @@ auto BuildMethodTableWithoutWindow() noexcept -> bool {
     ComPtr<IDXGISwapChain1> swapChain1;
     ComPtr<IDXGISwapChain3> swapChain3;
 
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
-    if (FAILED(createDevice(
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::Factory;
+        probeResult->result = result;
+        return false;
+    }
+    result = createDevice(
             nullptr,
             D3D_FEATURE_LEVEL_11_0,
-            IID_PPV_ARGS(&device)))) {
+            IID_PPV_ARGS(&device));
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::Device;
+        probeResult->result = result;
         return false;
     }
     D3D12_COMMAND_QUEUE_DESC queueDesc{};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (FAILED(device->CreateCommandQueue(
+    result = device->CreateCommandQueue(
             &queueDesc,
-            IID_PPV_ARGS(&queue)))) {
+            IID_PPV_ARGS(&queue));
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::Queue;
+        probeResult->result = result;
         return false;
     }
-    if (FAILED(device->CreateCommandAllocator(
+    result = device->CreateCommandAllocator(
             D3D12_COMMAND_LIST_TYPE_DIRECT,
-            IID_PPV_ARGS(&allocator)))) {
+            IID_PPV_ARGS(&allocator));
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::Allocator;
+        probeResult->result = result;
         return false;
     }
-    if (FAILED(device->CreateCommandList(
+    result = device->CreateCommandList(
             0U,
             D3D12_COMMAND_LIST_TYPE_DIRECT,
             allocator.Get(),
             nullptr,
-            IID_PPV_ARGS(&commandList)))) {
+            IID_PPV_ARGS(&commandList));
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::CommandList;
+        probeResult->result = result;
         return false;
     }
 
@@ -2864,9 +3274,16 @@ auto BuildMethodTableWithoutWindow() noexcept -> bool {
         : factory->CreateSwapChainForComposition(
             queue.Get(), &swapDesc, nullptr, &swapChain1);
     if (FAILED(swapChainResult)) {
+        probeResult->stage = CompositionProbeStage::SwapChain;
+        probeResult->result = swapChainResult;
         return false;
     }
-    if (FAILED(swapChain1.As(&swapChain3))) return false;
+    result = swapChain1.As(&swapChain3);
+    if (FAILED(result)) {
+        probeResult->stage = CompositionProbeStage::SwapChain3;
+        probeResult->result = result;
+        return false;
+    }
 
     std::memcpy(
         Methods.data(),
@@ -2885,21 +3302,101 @@ auto BuildMethodTableWithoutWindow() noexcept -> bool {
         *reinterpret_cast<void***>(commandList.Get()),
         60U * sizeof(void*));
     std::memcpy(
-        Methods.data() + 132U,
+        Methods.data() + SwapChainMethodTableOffset,
         *reinterpret_cast<void***>(swapChain3.Get()),
         18U * sizeof(void*));
+    probeResult->stage = CompositionProbeStage::SwapChain;
+    probeResult->result = S_OK;
     return true;
+}
+
+auto BuildMethodTableFromCapturedRealSwapChain() noexcept -> bool {
+    if (Detail::SelectRendererMethodDiscoveryPath(
+            false,
+            {},
+            QualifiedForegroundRealSwapChainMethods,
+            false)
+        != Detail::RendererMethodDiscoveryPath::CapturedRealSwapChain) {
+        return false;
+    }
+    Methods[PresentMethod] = QualifiedForegroundRealSwapChainMethods.present;
+    Methods[ResizeBuffersMethod] =
+        QualifiedForegroundRealSwapChainMethods.resizeBuffers;
+    return true;
+}
+
+[[nodiscard]] auto RendererMethodTargetSourceName(
+    RendererMethodTargetSource source) noexcept -> const char* {
+    switch (source) {
+    case RendererMethodTargetSource::None: return "none";
+    case RendererMethodTargetSource::CompositionProbe:
+        return "composition-probe";
+    case RendererMethodTargetSource::CapturedRealSwapChain:
+        return "bounded-real-swap-chain";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] auto IsPermanentMinHookFailure(MH_STATUS status) noexcept
+    -> bool {
+    return status == MH_ERROR_ALREADY_CREATED
+        || status == MH_ERROR_NOT_EXECUTABLE
+        || status == MH_ERROR_UNSUPPORTED_FUNCTION
+        || status == MH_ERROR_MODULE_NOT_FOUND
+        || status == MH_ERROR_FUNCTION_NOT_FOUND;
+}
+
+void LogMinHookInstallationFailure(
+    const char* stage,
+    const char* source,
+    MH_STATUS status) noexcept {
+    const bool permanent = IsPermanentMinHookFailure(status);
+    if (permanent)
+        PermanentMinHookInstallFailure.store(true, std::memory_order_release);
+    if (permanent) {
+        if (PermanentMinHookInstallFailureLogged.exchange(
+                true, std::memory_order_acq_rel)) {
+            return;
+        }
+    } else if (TransientMinHookInstallFailureLogged.exchange(
+                   true, std::memory_order_acq_rel)) {
+        return;
+    }
+    char message[320]{};
+    const int written = std::snprintf(
+        message,
+        sizeof(message),
+        "MapSense: MinHook installation failed (stage=%s, source=%s, status=%s, permanent=%s).",
+        stage != nullptr ? stage : "unknown",
+        source != nullptr ? source : "unknown",
+        MH_StatusToString(status),
+        permanent ? "true" : "false");
+    if (written > 0) LogWarning(message);
 }
 
 auto CreateAndEnableHook(
     std::size_t methodIndex,
     void* detour,
-    void** original) noexcept -> bool {
-    if (methodIndex >= Methods.size() || !Methods[methodIndex]) return false;
+    void** original,
+    const char* stage,
+    RendererMethodTargetSource source) noexcept -> bool {
+    if (methodIndex >= Methods.size() || !Methods[methodIndex]) {
+        LogMinHookInstallationFailure(
+            stage, RendererMethodTargetSourceName(source),
+            MH_ERROR_NOT_EXECUTABLE);
+        return false;
+    }
     const MH_STATUS created = MH_CreateHook(
         Methods[methodIndex], detour, original);
-    if (created != MH_OK) return false;
-    if (MH_EnableHook(Methods[methodIndex]) == MH_OK) return true;
+    if (created != MH_OK) {
+        LogMinHookInstallationFailure(
+            stage, RendererMethodTargetSourceName(source), created);
+        return false;
+    }
+    const MH_STATUS enabled = MH_EnableHook(Methods[methodIndex]);
+    if (enabled == MH_OK) return true;
+    LogMinHookInstallationFailure(
+        stage, RendererMethodTargetSourceName(source), enabled);
     MH_RemoveHook(Methods[methodIndex]);
     if (original) *original = nullptr;
     return false;
@@ -2908,15 +3405,23 @@ auto CreateAndEnableHook(
 auto CreateAndEnableFactoryHook(
     std::size_t methodIndex,
     void* detour,
-    void** original) noexcept -> bool {
+    void** original,
+    const char* stage) noexcept -> bool {
     if (methodIndex >= FactoryMethods.size()
         || !FactoryMethods[methodIndex]) {
+        LogMinHookInstallationFailure(
+            stage, "factory-ownership", MH_ERROR_NOT_EXECUTABLE);
         return false;
     }
     const MH_STATUS created = MH_CreateHook(
         FactoryMethods[methodIndex], detour, original);
-    if (created != MH_OK) return false;
-    if (MH_EnableHook(FactoryMethods[methodIndex]) == MH_OK) return true;
+    if (created != MH_OK) {
+        LogMinHookInstallationFailure(stage, "factory-ownership", created);
+        return false;
+    }
+    const MH_STATUS enabled = MH_EnableHook(FactoryMethods[methodIndex]);
+    if (enabled == MH_OK) return true;
+    LogMinHookInstallationFailure(stage, "factory-ownership", enabled);
     MH_RemoveHook(FactoryMethods[methodIndex]);
     if (original) *original = nullptr;
     return false;
@@ -3064,14 +3569,27 @@ auto InitializeD3D12ImGuiHost(
 
 auto TryInstallD3D12ImGuiHooks() noexcept -> bool {
     std::scoped_lock lock(HostMutex);
-    if (HooksInstalled) return true;
     if (!Configured) return false;
+    if (SelectedRealSwapChainMethodsConflicted) return false;
+    if (HooksInstalled) {
+        // Retry keeps qualifying only bounded foreground HWND candidates. It
+        // deliberately cannot elect a COM identity; HookPresent does that for
+        // the exact object that is actually presented.
+        RefreshForegroundRealSwapChainMethodQualificationLocked();
+        return !RendererPoisoned
+            && SelectedRealSwapChainCandidate != NoRealSwapChainCandidate;
+    }
+    if (RendererPoisoned) return false;
+    if (PermanentMinHookInstallFailure.load(std::memory_order_acquire))
+        return false;
     GpuDiagnostics::ConfigureBeforeDeviceCreation(LogInfo, LogWarning);
 
     if (!MinHookReady) {
         const MH_STATUS initialized = MH_Initialize();
         if (initialized != MH_OK
             && initialized != MH_ERROR_ALREADY_INITIALIZED) {
+            LogMinHookInstallationFailure(
+                "initialize", "host", initialized);
             return false;
         }
         MinHookReady = true;
@@ -3107,21 +3625,25 @@ auto TryInstallD3D12ImGuiHooks() noexcept -> bool {
             || !CreateAndEnableFactoryHook(
                 CreateSwapChainMethod,
                 reinterpret_cast<void*>(HookCreateSwapChain),
-                reinterpret_cast<void**>(&OriginalCreateSwapChain))
+                reinterpret_cast<void**>(&OriginalCreateSwapChain),
+                "factory-create-swap-chain")
             || !CreateAndEnableFactoryHook(
                 CreateSwapChainForHwndMethod,
                 reinterpret_cast<void*>(HookCreateSwapChainForHwnd),
-                reinterpret_cast<void**>(&OriginalCreateSwapChainForHwnd))
+                reinterpret_cast<void**>(&OriginalCreateSwapChainForHwnd),
+                "factory-create-swap-chain-for-hwnd")
             || !CreateAndEnableFactoryHook(
                 CreateSwapChainForCoreWindowMethod,
                 reinterpret_cast<void*>(HookCreateSwapChainForCoreWindow),
                 reinterpret_cast<void**>(
-                    &OriginalCreateSwapChainForCoreWindow))
+                    &OriginalCreateSwapChainForCoreWindow),
+                "factory-create-swap-chain-for-core-window")
             || !CreateAndEnableFactoryHook(
                 CreateSwapChainForCompositionMethod,
                 reinterpret_cast<void*>(HookCreateSwapChainForComposition),
                 reinterpret_cast<void**>(
-                    &OriginalCreateSwapChainForComposition))) {
+                    &OriginalCreateSwapChainForComposition),
+                "factory-create-swap-chain-for-composition")) {
             return rollbackFactoryHooks();
         }
         FactoryHooksInstalled = true;
@@ -3129,8 +3651,63 @@ auto TryInstallD3D12ImGuiHooks() noexcept -> bool {
             "MapSense: early DXGI swap-chain ownership hooks installed before D2R graphics initialization.");
     }
 
+    RefreshForegroundRealSwapChainMethodQualificationLocked();
+
     Methods = {};
-    if (!BuildMethodTableWithoutWindow()) {
+    CompositionProbeResult compositionProbe{};
+    const bool compositionProbeReady = BuildMethodTableWithoutWindow(
+        &compositionProbe);
+    if (!compositionProbeReady) {
+        if (!CompositionProbeFailureLogged.exchange(
+                true, std::memory_order_acq_rel)) {
+            char message[256]{};
+            const int written = std::snprintf(
+                message,
+                sizeof(message),
+                "MapSense: D3D12 composition method discovery is unavailable (stage=%s, result=0x%08lX).",
+                CompositionProbeStageName(compositionProbe.stage),
+                static_cast<unsigned long>(
+                    static_cast<std::uint32_t>(compositionProbe.result)));
+            if (written > 0) LogInfo(message);
+        }
+    }
+    const Detail::RendererMethodPair compositionProbeMethods{
+        .present = Methods[PresentMethod],
+        .resizeBuffers = Methods[ResizeBuffersMethod],
+    };
+    RendererMethodTargetSource selectedMethodSource{
+        RendererMethodTargetSource::None};
+    switch (Detail::SelectRendererMethodDiscoveryPath(
+        compositionProbeReady,
+        compositionProbeMethods,
+        QualifiedForegroundRealSwapChainMethods,
+        false)) {
+    case Detail::RendererMethodDiscoveryPath::CompositionProbe:
+        selectedMethodSource = RendererMethodTargetSource::CompositionProbe;
+        break;
+    case Detail::RendererMethodDiscoveryPath::CapturedRealSwapChain:
+        Methods = {};
+        if (BuildMethodTableFromCapturedRealSwapChain()) {
+            if (!RealSwapChainFallbackLogged.exchange(
+                true, std::memory_order_acq_rel)) {
+                LogInfo(
+                    "MapSense: using consistent Present and ResizeBuffers targets captured from a bounded real direct-queue swap chain.");
+            }
+            selectedMethodSource = RendererMethodTargetSource::CapturedRealSwapChain;
+        } else {
+            Methods = {};
+        }
+        break;
+    case Detail::RendererMethodDiscoveryPath::ProbeRealMismatch:
+        Methods = {};
+        PoisonRendererForMethodTargetMismatchLocked(
+            "MapSense: composition probe targets differ from bounded real swap-chain targets; MapSense GPU submission is fail-closed.");
+        break;
+    case Detail::RendererMethodDiscoveryPath::Unavailable:
+        Methods = {};
+        break;
+    }
+    if (Methods[PresentMethod] == nullptr || Methods[ResizeBuffersMethod] == nullptr) {
         if (!PresentDiscoveryWaitingLogged.exchange(
                 true, std::memory_order_acq_rel)) {
             LogInfo(
@@ -3145,25 +3722,39 @@ auto TryInstallD3D12ImGuiHooks() noexcept -> bool {
         if (OriginalPresent != nullptr) RemoveOwnedHook(PresentMethod);
         OriginalResizeBuffers = nullptr;
         OriginalPresent = nullptr;
+        InstalledRendererMethods = {};
+        InstalledRendererMethodSource = RendererMethodTargetSource::None;
         return false;
     };
     if (!CreateAndEnableHook(
             PresentMethod,
             reinterpret_cast<void*>(HookPresent),
-            reinterpret_cast<void**>(&OriginalPresent))
+            reinterpret_cast<void**>(&OriginalPresent),
+            "present",
+            selectedMethodSource)
         || !CreateAndEnableHook(
             ResizeBuffersMethod,
             reinterpret_cast<void*>(HookResizeBuffers),
-            reinterpret_cast<void**>(&OriginalResizeBuffers))) {
+            reinterpret_cast<void**>(&OriginalResizeBuffers),
+            "resize-buffers",
+            selectedMethodSource)) {
         return rollbackRenderHooks();
     }
 
+    InstalledRendererMethods = {
+        .present = Methods[PresentMethod],
+        .resizeBuffers = Methods[ResizeBuffersMethod],
+    };
+    InstalledRendererMethodSource = selectedMethodSource;
     HooksInstalled = true;
     HooksInstalledPublished.store(true, std::memory_order_release);
     PresentDiscoveryWaitingLogged.store(false, std::memory_order_release);
     LogInfo(
         "MapSense: fail-closed D3D12 hooks installed with exact swap-chain command-queue ownership.");
-    return true;
+    // Keep the bounded retry worker alive until HookPresent elects the exact
+    // foreground COM identity. This lets late foreground evidence reconcile
+    // composition-first targets without letting retry select an identity.
+    return SelectedRealSwapChainCandidate != NoRealSwapChainCandidate;
 }
 
 void ShutdownD3D12ImGuiHost() noexcept {
@@ -3241,6 +3832,29 @@ void ShutdownD3D12ImGuiHost() noexcept {
         UnboundSwapChainWarningLogged.store(false, std::memory_order_release);
         DeviceRemovalWarningLogged.store(false, std::memory_order_release);
         PresentDiscoveryWaitingLogged.store(false, std::memory_order_release);
+        CompositionProbeFailureLogged.store(false, std::memory_order_release);
+        RealSwapChainFallbackLogged.store(false, std::memory_order_release);
+        RealSwapChainReplacementLogged.store(false, std::memory_order_release);
+        RealSwapChainCandidateConflictLogged.store(
+            false, std::memory_order_release);
+        RealSwapChainSelectedConflictLogged.store(
+            false, std::memory_order_release);
+        RealSwapChainQueryFailureLogged.store(false, std::memory_order_release);
+        RealSwapChainInvalidPairLogged.store(false, std::memory_order_release);
+        ProbeRealMismatchLogged.store(false, std::memory_order_release);
+        WrappedQueueDeviceInfoLogged.store(false, std::memory_order_release);
+        TransientMinHookInstallFailureLogged.store(
+            false, std::memory_order_release);
+        PermanentMinHookInstallFailureLogged.store(
+            false, std::memory_order_release);
+        PermanentMinHookInstallFailure.store(false, std::memory_order_release);
+        RealSwapChainCandidates = {};
+        SelectedRealSwapChainCandidate = NoRealSwapChainCandidate;
+        NextRealSwapChainCandidateGeneration = 1U;
+        QualifiedForegroundRealSwapChainMethods = {};
+        SelectedRealSwapChainMethodsConflicted = false;
+        InstalledRendererMethods = {};
+        InstalledRendererMethodSource = RendererMethodTargetSource::None;
         MenuOpen.store(false, std::memory_order_release);
         AwaitingFirstBounds.store(false, std::memory_order_release);
         PublishPanelBounds({});

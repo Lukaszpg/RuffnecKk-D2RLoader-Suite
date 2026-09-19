@@ -1,5 +1,7 @@
 #pragma once
 
+#include <RuffnecKk/tracked_native_transform.hpp>
+
 #include <toml++/toml.hpp>
 
 #include <algorithm>
@@ -22,6 +24,26 @@ struct Config {
     bool hurricane{true};
     bool diagnostics{};
 };
+
+enum class SharedStartLoadMode {
+    InstallHooks,
+    CompatibilityInactive,
+    Refuse,
+};
+
+constexpr SharedStartLoadMode SelectSharedStartLoadMode(
+        RuffnecKk::TrackedNativeTransform::Admission admission) noexcept {
+    using RuffnecKk::TrackedNativeTransform::Admission;
+    switch (admission) {
+    case Admission::Pristine:
+        return SharedStartLoadMode::InstallHooks;
+    case Admission::TrackedCompatible:
+        return SharedStartLoadMode::CompatibilityInactive;
+    case Admission::Rejected:
+    default:
+        return SharedStartLoadMode::Refuse;
+    }
+}
 
 constexpr bool IsSupportedSkill(std::int32_t skillId) noexcept {
     return skillId == ArmageddonSkillId || skillId == HurricaneSkillId;
@@ -74,6 +96,10 @@ inline bool ReadBoolean(
         std::string_view qualifiedName) {
     const auto* node = table.get(key);
     if (!node) return true;
+    if (!node->is_boolean()) {
+        error = std::string(qualifiedName) + " must be true or false";
+        return false;
+    }
     const auto value = node->value<bool>();
     if (!value) {
         error = std::string(qualifiedName) + " must be true or false";

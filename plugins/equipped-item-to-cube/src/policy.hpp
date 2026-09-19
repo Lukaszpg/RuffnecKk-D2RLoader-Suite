@@ -2,41 +2,56 @@
 
 #include "config.hpp"
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
 
 namespace RuffnecKk::EquippedItemToCube {
 
-inline constexpr std::size_t ItemTransferPacketSize = 21;
 inline constexpr std::uint8_t InventoryTransferOpcode = 0x54;
 inline constexpr std::uint8_t EquippedTransferOpcode = 0x58;
 inline constexpr std::uint32_t SelfTargetGuid = 0xFFFFFFFFu;
 inline constexpr std::uint32_t CubeInventoryPage = 3;
 inline constexpr std::uint32_t BodyLocationCount = 11;
 
-using ItemTransferPacket = std::array<std::uint8_t, ItemTransferPacketSize>;
+enum ModifierState : std::uint32_t {
+    NativeControl = 1U << 0,
+    NativeLeftControl = 1U << 1,
+    NativeRightControl = 1U << 2,
+    Win32AsyncControl = 1U << 3,
+    Win32AsyncLeftControl = 1U << 4,
+    Win32AsyncRightControl = 1U << 5,
+    Win32StateControl = 1U << 6,
+    Win32StateLeftControl = 1U << 7,
+    Win32StateRightControl = 1U << 8,
+};
 
-constexpr auto ReadU32(
-    const ItemTransferPacket& packet,
-    std::size_t offset
-) noexcept -> std::uint32_t {
-    return static_cast<std::uint32_t>(packet[offset])
-        | (static_cast<std::uint32_t>(packet[offset + 1]) << 8)
-        | (static_cast<std::uint32_t>(packet[offset + 2]) << 16)
-        | (static_cast<std::uint32_t>(packet[offset + 3]) << 24);
+inline constexpr std::uint32_t NativeControlStates = NativeControl
+    | NativeLeftControl | NativeRightControl;
+inline constexpr std::uint32_t Win32ControlStates = Win32AsyncControl
+    | Win32AsyncLeftControl | Win32AsyncRightControl
+    | Win32StateControl | Win32StateLeftControl | Win32StateRightControl;
+
+constexpr auto HasNativeControl(std::uint32_t state) noexcept -> bool {
+    return (state & NativeControlStates) != 0;
 }
 
-constexpr void WriteU32(
-    ItemTransferPacket& packet,
-    std::size_t offset,
-    std::uint32_t value
-) noexcept {
-    packet[offset] = static_cast<std::uint8_t>(value);
-    packet[offset + 1] = static_cast<std::uint8_t>(value >> 8);
-    packet[offset + 2] = static_cast<std::uint8_t>(value >> 16);
-    packet[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+constexpr auto HasWin32Control(std::uint32_t state) noexcept -> bool {
+    return (state & Win32ControlStates) != 0;
 }
+
+// Diagnostic 1.0.3 proved this legacy decision agrees with D2R's native Ctrl
+// state on the failing global-stack route, so preserve it unchanged.
+constexpr auto LegacyControlAccepted(std::uint32_t state) noexcept -> bool {
+    return (state & Win32AsyncControl) != 0;
+}
+
+struct TwentyOneByteCommand {
+    std::uint8_t opcode{};
+    std::uint32_t field1{};
+    std::uint32_t field2{};
+    std::uint32_t field3{};
+    std::uint32_t field4{};
+    std::uint32_t field5{};
+};
 
 constexpr auto IsEquippedBodyLocation(std::uint32_t bodyLocation) noexcept -> bool {
     return bodyLocation > 0 && bodyLocation < BodyLocationCount;
@@ -44,27 +59,27 @@ constexpr auto IsEquippedBodyLocation(std::uint32_t bodyLocation) noexcept -> bo
 
 constexpr auto ShouldRewriteCubeTransfer(
     bool rewriteArmed,
-    const ItemTransferPacket& packet,
+    const TwentyOneByteCommand& command,
     std::uint32_t bodyLocation
 ) noexcept -> bool {
     return rewriteArmed
         && IsEquippedBodyLocation(bodyLocation)
-        && packet[0] == InventoryTransferOpcode
-        && ReadU32(packet, 13) == CubeInventoryPage;
+        && command.opcode == InventoryTransferOpcode
+        && command.field4 == CubeInventoryPage;
 }
 
 constexpr auto RewriteAsEquippedTransfer(
-    const ItemTransferPacket& inventoryPacket,
+    const TwentyOneByteCommand& inventoryCommand,
     std::uint32_t bodyLocation
-) noexcept -> ItemTransferPacket {
-    ItemTransferPacket equippedPacket{};
-    equippedPacket[0] = EquippedTransferOpcode;
-    WriteU32(equippedPacket, 1, ReadU32(inventoryPacket, 1));
-    WriteU32(equippedPacket, 5, SelfTargetGuid);
-    WriteU32(equippedPacket, 9, bodyLocation);
-    WriteU32(equippedPacket, 13, ReadU32(inventoryPacket, 13));
-    WriteU32(equippedPacket, 17, ReadU32(inventoryPacket, 17));
-    return equippedPacket;
+) noexcept -> TwentyOneByteCommand {
+    return TwentyOneByteCommand{
+        .opcode = EquippedTransferOpcode,
+        .field1 = inventoryCommand.field1,
+        .field2 = SelfTargetGuid,
+        .field3 = bodyLocation,
+        .field4 = inventoryCommand.field4,
+        .field5 = inventoryCommand.field5,
+    };
 }
 
 } // namespace RuffnecKk::EquippedItemToCube

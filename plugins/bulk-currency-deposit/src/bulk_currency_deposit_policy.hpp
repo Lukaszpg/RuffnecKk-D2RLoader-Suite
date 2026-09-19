@@ -1,5 +1,7 @@
 #pragma once
 
+#include <RuffnecKk/tracked_native_transform.hpp>
+
 #include <toml++/toml.hpp>
 
 #include <algorithm>
@@ -128,25 +130,29 @@ private:
     std::atomic<std::uint32_t> active_{};
 };
 
-enum class UiStateEntryStatus : std::uint8_t {
-    Unchanged,
-    TrackedInlineHook,
-    Other,
-};
+constexpr auto EvaluateUiStateEntry(
+        RuffnecKk::TrackedNativeTransform::Observation observation,
+        bool pristineBytesMatch) noexcept
+        -> RuffnecKk::TrackedNativeTransform::Admission {
+    return RuffnecKk::TrackedNativeTransform::Evaluate(
+        observation,
+        pristineBytesMatch,
+        "ruffneckk-remote-stash",
+        RuffnecKk::TrackedNativeTransform::Kind::InlineHook);
+}
 
-constexpr bool AcceptUiStateEntry(
-        UiStateEntryStatus status,
-        bool vanillaSignatureMatches,
-        bool entryIsExecutable,
-        std::uint32_t ownerCount,
-        std::string_view ownerPluginId) noexcept {
-    if (status == UiStateEntryStatus::Unchanged) {
-        return vanillaSignatureMatches;
-    }
-    return status == UiStateEntryStatus::TrackedInlineHook
-        && entryIsExecutable
-        && ownerCount == 1
-        && ownerPluginId == "ruffneckk-remote-stash";
+constexpr auto EvaluateItemInteractionBlockedEntry(
+        RuffnecKk::TrackedNativeTransform::Observation observation,
+        bool pristineBytesMatch,
+        bool untouchedTailMatches) noexcept
+        -> RuffnecKk::TrackedNativeTransform::Admission {
+    observation.structuralWitnessesMatch =
+        observation.structuralWitnessesMatch && untouchedTailMatches;
+    return RuffnecKk::TrackedNativeTransform::Evaluate(
+        observation,
+        pristineBytesMatch,
+        "celestialrayone.whirlwind",
+        RuffnecKk::TrackedNativeTransform::Kind::InlineHook);
 }
 
 struct ButtonConfig {

@@ -1,4 +1,4 @@
-# Armageddon-Hurricane CtC Fix 1.0.0
+# Armageddon-Hurricane CtC Fix 1.0.1
 
 Lets Armageddon and Hurricane start correctly when triggered by native
 chance-to-cast item effects.

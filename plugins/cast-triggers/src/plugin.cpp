@@ -4,9 +4,16 @@
 
 #include <D2RLPlugin/api.h>
 #include <RuffnecKk/native_stat_compat.hpp>
+#include <RuffnecKk/tracked_native_transform.hpp>
+#include <RuffnecKk/tracked_native_transform_d2rl.hpp>
 
 #include "cast_triggers_policy.hpp"
-#define RUFFNECKK_CAST_VERSION "1.1.0"
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+#include "damage_cleanup_provider.hpp"
+#define RUFFNECKK_CAST_VERSION "1.0.2"
+#else
+#define RUFFNECKK_CAST_VERSION "1.1.1"
+#endif
 
 #include <Windows.h>
 
@@ -19,6 +26,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -291,6 +299,51 @@ std::uint8_t* Base{};
 Config Settings{};
 std::string LoadedConfigPath{"built-in defaults"};
 std::atomic_bool Operational{};
+std::atomic<DeferredNativeActivationState> NativeActivationState{
+    DeferredNativeActivationState::Pending};
+const D2RL::LifecycleServiceV1* LifecycleService{};
+std::atomic<D2RL::Lifecycle::ListenerHandle> DataTablesLoadedListenerHandle{
+    D2RL::Lifecycle::InvalidHandle};
+
+bool IsNativeBehaviorActive() noexcept {
+    return IsDeferredNativeBehaviorActive(
+        NativeActivationState.load(std::memory_order_acquire),
+        Operational.load(std::memory_order_acquire));
+}
+
+bool TryTransitionNativeActivation(
+        DeferredNativeActivationTransition transition) noexcept {
+    auto observed = NativeActivationState.load(std::memory_order_acquire);
+    for (;;) {
+        const auto desired = TransitionDeferredNativeActivation(
+            observed, transition);
+        if (desired == observed) return false;
+        if (NativeActivationState.compare_exchange_weak(
+                observed,
+                desired,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+bool PublishNativeActivation() noexcept {
+    if (!TryTransitionNativeActivation(
+            DeferredNativeActivationTransition::PublishActive)) {
+        return false;
+    }
+    // State becomes Active before Operational.  If unload wins in this small
+    // interval, its Stopping state makes every wrapper pass through and this
+    // publication is immediately withdrawn below.
+    Operational.store(true, std::memory_order_release);
+    if (!IsNativeBehaviorActive()) {
+        Operational.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
 SkillHandlerFn OriginalSkillHandler{};
 CastItemSkillOnTargetFn OriginalCastItemSkillOnTarget{};
 CastItemSkillAtPositionFn OriginalCastItemSkillAtPosition{};
@@ -315,6 +368,7 @@ ResolveActiveWeaponFn ResolveActiveWeapon{};
 // Governed native dependencies 0x2F5020 and 0x33D4F0 are admitted by the
 // shared stat adapter; their exact Core provider contract lives in common.
 RuffnecKk::NativeStatCompat::Adapter NativeStats;
+NativeCapabilities Capabilities{true, true, true, true, true};
 GetSeedFn GetSeed{};
 
 thread_local std::uint32_t CastDispatchDepth{};
@@ -777,7 +831,9 @@ bool BindNativeStatHelpers() noexcept {
     using RuffnecKk::NativeStatCompat::ToMask;
     if (NativeStats.BindCurrentProcess(
             reinterpret_cast<std::uintptr_t>(Base),
-            ToMask(Helper::GetUnitStat) | ToMask(Helper::WeaponMastery))) {
+            ToMask(Helper::GetUnitStat) | ToMask(Helper::WeaponMastery),
+            RuffnecKk::TrackedNativeTransform::D2RLDiagnosticsContext(
+                Context))) {
         return true;
     }
     Context->LogError(
@@ -785,12 +841,131 @@ bool BindNativeStatHelpers() noexcept {
     return false;
 }
 
+bool IsExecutableAddress(const void* address) noexcept {
+    MEMORY_BASIC_INFORMATION information{};
+    if (!address || VirtualQuery(address, &information, sizeof(information))
+            != sizeof(information)
+            || information.State != MEM_COMMIT
+            || (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    switch (information.Protect & 0xFFU) {
+    case PAGE_EXECUTE:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+template <std::size_t Size>
+auto ClassifyComposableSite(
+        std::uintptr_t rva,
+        const std::array<std::uint8_t, Size>& expected,
+        std::string_view compatibleOwner,
+        const char* label) noexcept -> NativeSiteDisposition {
+    using namespace RuffnecKk::TrackedNativeTransform;
+    constexpr std::size_t PatchedPrefixSize = 8;
+    const bool executable = IsExecutableAddress(Base + rva);
+    const bool pristine = std::memcmp(
+        Base + rva, expected.data(), expected.size()) == 0;
+    const bool tailMatches = expected.size() > PatchedPrefixSize
+        && std::memcmp(
+            Base + rva + PatchedPrefixSize,
+            expected.data() + PatchedPrefixSize,
+            expected.size() - PatchedPrefixSize) == 0;
+
+    Observation observation{
+        .state = State::Unchanged,
+        .kind = Kind::Unknown,
+        .ownerCount = 0,
+        .ownerPluginId = {},
+        .targetExecutable = executable,
+        .structuralWitnessesMatch = pristine || tailMatches,
+    };
+    if (!pristine) {
+        const auto expectedBytes = std::as_bytes(std::span{expected});
+        if (!RuffnecKk::TrackedNativeTransform::ObserveD2RL(
+                const_cast<D2RL::PluginContext*>(Context),
+                reinterpret_cast<std::uintptr_t>(Base),
+                reinterpret_cast<std::uintptr_t>(Base + rva),
+                expectedBytes,
+                observation)) {
+            const auto message = std::string("CastTriggers: ") + label
+                + " differs from vanilla and has no complete tracked owner proof; plugin refused.";
+            Context->LogError(message.c_str());
+            return NativeSiteDisposition::Rejected;
+        }
+        observation.targetExecutable = executable;
+        observation.structuralWitnessesMatch = tailMatches;
+    }
+
+    switch (Evaluate(
+        observation, pristine, compatibleOwner, Kind::InlineHook)) {
+    case Admission::Pristine:
+        return NativeSiteDisposition::Pristine;
+    case Admission::TrackedCompatible: {
+        const auto message = std::string("CastTriggers: ") + label
+            + " is owned by compatible plugin "
+            + std::string(compatibleOwner)
+            + "; the dependent Cast Triggers capability will remain off.";
+        Context->LogWarn(message.c_str());
+        return NativeSiteDisposition::CompatibleForeignOwner;
+    }
+    case Admission::Rejected:
+        break;
+    }
+    const auto message = std::string("CastTriggers: ") + label
+        + " ownership or unchanged-tail proof was rejected; plugin refused.";
+    Context->LogError(message.c_str());
+    return NativeSiteDisposition::Rejected;
+}
+
 bool ValidateNativeFingerprint() noexcept {
-    return Check(SkillHandlerRva, SkillHandlerExpected, "skill handler")
-        && Check(
+    const auto skillHandler = ClassifyComposableSite(
+        SkillHandlerRva,
+        SkillHandlerExpected,
+        "celestialrayone.skill-srcdam-calc",
+        "skill handler");
+    const auto damageBuilder = ClassifyComposableSite(
+        FillDamageValuesRva,
+        FillDamageValuesExpected,
+        "celestialrayone.critical-strike-damage",
+        "damage builder");
+    const auto positionInput = ClassifyComposableSite(
+        PlayerSkillPositionInputRva,
+        PlayerSkillPositionInputExpected,
+        "celestialrayone.whirlwind",
+        "player position-skill input executor");
+    const auto targetItemSkill = ClassifyComposableSite(
+        CastItemSkillOnTargetRva,
+        CastItemSkillOnTargetExpected,
+        "celestialrayone.whirlwind",
+        "target item-skill caster");
+    const auto positionItemSkill = ClassifyComposableSite(
+        CastItemSkillAtPositionRva,
+        CastItemSkillAtPositionExpected,
+        "celestialrayone.whirlwind",
+        "position item-skill caster");
+    Capabilities = ResolveNativeCapabilities(
+        skillHandler,
+        damageBuilder,
+        positionInput,
+        targetItemSkill,
+        positionItemSkill);
+    if (!Capabilities.loadable) {
+        Context->LogError(
+            "CastTriggers: one or more native sites failed compatibility admission; plugin refused. See the preceding site-specific error.");
+        return false;
+    }
+
+    return (!Capabilities.sourceSkillTriggers
+            || Check(
             SkillHandlerContextWitnessRva,
             SkillHandlerContextWitnessExpected,
-            "skill handler data-context witness")
+            "skill handler data-context witness"))
         && Check(
             GameFrameLayoutWitnessRva,
             GameFrameLayoutWitnessExpected,
@@ -800,31 +975,28 @@ bool ValidateNativeFingerprint() noexcept {
             DispatchUnitStatEventExpected,
             "unit-stat event dispatcher")
         && Check(
-            PlayerSkillPositionInputRva,
-            PlayerSkillPositionInputExpected,
-            "player position-skill input executor")
-        && Check(
             PlayerSkillUnitInputRva,
             PlayerSkillUnitInputExpected,
             "player unit-skill input executor")
-        && Check(GetTargetUnitRva, GetTargetUnitExpected, "target resolver")
+        && (!Capabilities.sourceSkillTriggers
+            || Check(GetTargetUnitRva, GetTargetUnitExpected, "target resolver"))
         && Check(
             GetServerUnitRva,
             GetServerUnitExpected,
             "server unit resolver")
         && Check(GetUnitTypeRva, GetUnitTypeExpected, "unit type helper")
-        && Check(
+        && (!Capabilities.sourceSkillTriggers || Check(
             GetDynamicPathRva,
             GetDynamicPathExpected,
-            "dynamic path helper")
-        && Check(
+            "dynamic path helper"))
+        && (!Capabilities.sourceSkillTriggers || Check(
             PathGetFirstPointXRva,
             PathGetFirstPointXExpected,
-            "path first-point X accessor")
-        && Check(
+            "path first-point X accessor"))
+        && (!Capabilities.sourceSkillTriggers || Check(
             PathGetFirstPointYRva,
             PathGetFirstPointYExpected,
-            "path first-point Y accessor")
+            "path first-point Y accessor"))
         && Check(
             GetSkillsRecordRva,
             GetSkillsRecordExpected,
@@ -833,30 +1005,22 @@ bool ValidateNativeFingerprint() noexcept {
             SkillsRecordStrideWitnessRva,
             SkillsRecordStrideWitnessExpected,
             "SkillsTxt stride witness")
-        && Check(
-            CastItemSkillOnTargetRva,
-            CastItemSkillOnTargetExpected,
-            "target item-skill caster")
-        && Check(
-            CastItemSkillAtPositionRva,
-            CastItemSkillAtPositionExpected,
-            "position item-skill caster")
-        && Check(
-            FillDamageValuesRva,
-            FillDamageValuesExpected,
-            "damage builder")
-        && Check(CopyDamageRva, CopyDamageExpected, "damage copy constructor")
-        && Check(MoveDamageRva, MoveDamageExpected, "damage move constructor")
-        && Check(DestroyDamageRva, DestroyDamageExpected, "damage destructor")
+        && (!Capabilities.criticalStrikeTrigger
+            || Check(CopyDamageRva, CopyDamageExpected, "damage copy constructor"))
+        && (!Capabilities.criticalStrikeTrigger
+            || Check(MoveDamageRva, MoveDamageExpected, "damage move constructor"))
+        && (!Capabilities.criticalStrikeTrigger
+            || Check(DestroyDamageRva, DestroyDamageExpected, "damage destructor"))
         && Check(EventFunc15Rva, EventFunc15Expected, "Open Wounds callback")
         && Check(EventFunc16Rva, EventFunc16Expected, "Crushing Blow callback")
         && Check(EventFunc20Rva, EventFunc20Expected, "item-skill callback")
-        && Check(
+        && (!Capabilities.criticalStrikeTrigger || Check(
             ResolveActiveWeaponRva,
             ResolveActiveWeaponExpected,
-            "active weapon resolver")
-        && BindNativeStatHelpers()
-        && Check(GetSeedRva, GetSeedExpected, "unit seed accessor")
+            "active weapon resolver"))
+        && (!Capabilities.criticalStrikeTrigger || BindNativeStatHelpers())
+        && (!Capabilities.criticalStrikeTrigger
+            || Check(GetSeedRva, GetSeedExpected, "unit seed accessor"))
         && Check(
             ActiveSkillLayoutWitnessRva,
             ActiveSkillLayoutWitnessExpected,
@@ -1086,7 +1250,8 @@ bool DispatchCombatTrigger(
         void* attacker,
         void* target,
         CombatTriggerKind kind) noexcept {
-    if (!game || !attacker || !target || !OriginalDispatchUnitStatEvent
+    if (!IsNativeBehaviorActive() || !Capabilities.itemSkillExecution || !game || !attacker || !target
+            || !OriginalDispatchUnitStatEvent
             || CastDispatchDepth != 0
             || !IsCombatTriggerEnabled(Settings.combatTriggers, kind)) {
         return false;
@@ -1131,7 +1296,7 @@ void __fastcall HookFillDamageValues(
         void* damage,
         std::int32_t mode,
         std::uint8_t sourceDamage) noexcept {
-    const bool inspectCritical = Operational.load(std::memory_order_acquire)
+    const bool inspectCritical = IsNativeBehaviorActive()
         && ProcExecutionDepth == 0
         && attacker
         && GetUnitType(attacker) == PlayerUnitType;
@@ -1201,7 +1366,7 @@ void* __fastcall HookCopyDamage(
         void* destination,
         const void* source) noexcept {
     void* const result = OriginalCopyDamage(destination, source);
-    if (Operational.load(std::memory_order_acquire)) {
+    if (IsNativeBehaviorActive()) {
         PropagateCriticalDamageMarker(source, destination);
     }
     return result;
@@ -1211,19 +1376,37 @@ void* __fastcall HookMoveDamage(
         void* destination,
         void* source) noexcept {
     void* const result = OriginalMoveDamage(destination, source);
-    if (Operational.load(std::memory_order_acquire)) {
+    if (IsNativeBehaviorActive()) {
         TransferCriticalDamageMarker(source, destination);
     }
     return result;
 }
 
 void __fastcall HookDestroyDamage(void* damage) noexcept {
-    if (Operational.load(std::memory_order_acquire)) {
+    if (IsNativeBehaviorActive()) {
         RemoveCriticalDamageMarker(damage);
     }
     OriginalDestroyDamage(damage);
 }
 
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+DamageCleanup::Provider CleanupProvider;
+void __cdecl CleanupOwnedDamage(void* damage) noexcept {
+    HookDestroyDamage(damage);
+}
+auto __cdecl AcceptCleanup(const DamageCleanup::RequestV1* request) noexcept -> bool {
+    return CleanupProvider.Accepts(request);
+}
+auto __cdecl RunCleanup(const DamageCleanup::RequestV1* request, void* damage,
+        DamageCleanup::OperationFn operation, void* userData) noexcept
+        -> DamageCleanup::Result {
+    return CleanupProvider.Run(request, damage, operation, userData);
+}
+const DamageCleanup::ApiV1 CleanupApi{
+    sizeof(DamageCleanup::ApiV1), DamageCleanup::Version,
+    DamageCleanup::DamageLayout, AcceptCleanup, RunCleanup,
+};
+#endif
 
 std::int32_t __fastcall HookEventFunc15(
         void* game,
@@ -1239,7 +1422,7 @@ std::int32_t __fastcall HookEventFunc15(
         game, event, attacker, target, damage,
         argument6, argument7, argument8, argument9);
     auto* const frame = ActiveCombatObservation;
-    if (result != 0 && frame
+    if (IsNativeBehaviorActive() && result != 0 && frame
             && frame->game == game
             && frame->attacker == attacker
             && frame->target == target
@@ -1266,7 +1449,7 @@ std::int32_t __fastcall HookEventFunc16(
         game, event, attacker, target, damage,
         argument6, argument7, argument8, argument9);
     auto* const frame = ActiveCombatObservation;
-    if (result != 0 && frame
+    if (IsNativeBehaviorActive() && result != 0 && frame
             && frame->game == game
             && frame->attacker == attacker
             && frame->target == target
@@ -1289,7 +1472,7 @@ std::int32_t __fastcall HookEventFunc20(
         std::int32_t argument7,
         std::int32_t argument8,
         void* argument9) noexcept {
-    if (Operational.load(std::memory_order_acquire)
+    if (IsNativeBehaviorActive()
             && !ShouldExposeSyntheticStat(
                 Settings,
                 ActiveSourceTrigger,
@@ -1310,7 +1493,7 @@ std::int32_t __fastcall HookDispatchUnitStatEvent(
         void* attacker,
         void* target,
         void* damage) noexcept {
-    const bool observe = Operational.load(std::memory_order_acquire)
+    const bool observe = IsNativeBehaviorActive()
         && (event == MeleeDamageEvent || event == MissileDamageEvent)
         && game && attacker && target && damage
         && GetUnitType(attacker) == PlayerUnitType;
@@ -1332,7 +1515,8 @@ std::int32_t __fastcall HookDispatchUnitStatEvent(
         DamageResultFlagsOffset);
     const bool successful = (resultFlags & ResultSuccess) != 0;
     const bool hadCriticalMarker = TakeCriticalDamageMarker(damage);
-    const bool critical = hadCriticalMarker && successful;
+    const bool critical = Capabilities.criticalStrikeTrigger
+        && hadCriticalMarker && successful;
     if (successful
             && (resultFlags & CriticalOrDeadlyResult) != 0
             && !hadCriticalMarker) {
@@ -1458,10 +1642,11 @@ bool DispatchAttackAttemptFromInput(
         std::int32_t skillId,
         const NativeSourceTargetDescriptor& descriptor,
         std::int32_t inputResult) noexcept {
-    if (!IsAcceptedPlayerSkillInput(inputResult) || !game || !unit
+    if (!Capabilities.itemSkillExecution
+            || !IsAcceptedPlayerSkillInput(inputResult) || !game || !unit
             || descriptor.kind == NativeSourceTargetKind::None
             || !OriginalDispatchUnitStatEvent
-            || !Operational.load(std::memory_order_acquire)
+            || !IsNativeBehaviorActive()
             || CastDispatchDepth != 0
             || ProcExecutionDepth != 0
             || GetUnitType(unit) != PlayerUnitType
@@ -1538,7 +1723,7 @@ void CapturePlayerInputTarget(
         std::int32_t targetGuid,
         std::int32_t x,
         std::int32_t y) noexcept {
-    if (!game || !unit || skillId < MinimumSkillId
+    if (!IsNativeBehaviorActive() || !game || !unit || skillId < MinimumSkillId
             || skillId > MaximumSkillId
             || kind == NativeSourceTargetKind::None) {
         return;
@@ -1608,6 +1793,7 @@ bool ResolvePlayerInputTarget(
     descriptor = {};
     reusedChannelTarget = false;
     expired = false;
+    if (!IsNativeBehaviorActive()) return false;
     PlayerInputTargetEntry captured{};
     {
         std::scoped_lock lock(PlayerInputTargetMutex);
@@ -1670,6 +1856,7 @@ bool ShouldDispatchChanneling(
         void* unit,
         std::int32_t skillId,
         std::uint32_t currentFrame) noexcept {
+    if (!IsNativeBehaviorActive()) return false;
     std::scoped_lock lock(ChannelingCadenceMutex);
     ++ChannelingObservationSequence;
 
@@ -1707,6 +1894,7 @@ bool ShouldDispatchChanneling(
 }
 
 void CommitObservedSourcePosition() noexcept {
+    if (!IsNativeBehaviorActive()) return;
     if (!ObservedSourceTargetXReady || !ObservedSourceTargetYReady) return;
     ObservedSourceTargetKind = NativeSourceTargetKind::Position;
     ObservedSourceTarget = nullptr;
@@ -1716,7 +1904,7 @@ void CommitObservedSourcePosition() noexcept {
 
 void* __fastcall HookGetTargetUnit(void* game, void* unit) noexcept {
     void* const target = OriginalGetTargetUnit(game, unit);
-    if (!SourceTargetObservationActive
+    if (!IsNativeBehaviorActive() || !SourceTargetObservationActive
             || game != SourceTargetObservationGame
             || unit != SourceTargetObservationUnit) {
         return target;
@@ -1736,7 +1924,7 @@ void* __fastcall HookGetTargetUnit(void* game, void* unit) noexcept {
 
 std::int32_t __fastcall HookPathGetFirstPointX(void* path) noexcept {
     const auto x = OriginalPathGetFirstPointX(path);
-    if (SourceTargetObservationActive
+    if (IsNativeBehaviorActive() && SourceTargetObservationActive
             && path == SourceTargetObservationPath
             && ObservedSourceTargetKind != NativeSourceTargetKind::Unit) {
         ObservedSourceTargetX = x;
@@ -1748,7 +1936,7 @@ std::int32_t __fastcall HookPathGetFirstPointX(void* path) noexcept {
 
 std::int32_t __fastcall HookPathGetFirstPointY(void* path) noexcept {
     const auto y = OriginalPathGetFirstPointY(path);
-    if (SourceTargetObservationActive
+    if (IsNativeBehaviorActive() && SourceTargetObservationActive
             && path == SourceTargetObservationPath
             && ObservedSourceTargetKind != NativeSourceTargetKind::Unit) {
         ObservedSourceTargetY = y;
@@ -1765,6 +1953,10 @@ std::int32_t __fastcall HookPlayerSkillPositionInput(
         std::int32_t y,
         std::int32_t argument,
         void* activeSkill) noexcept {
+    if (!IsNativeBehaviorActive()) {
+        return OriginalPlayerSkillPositionInput(
+            game, unit, x, y, argument, activeSkill);
+    }
     const auto skillId = ReadActiveSkillId(activeSkill);
     CapturePlayerInputTarget(
         game,
@@ -1799,6 +1991,11 @@ std::int32_t __fastcall HookPlayerSkillUnitInput(
         void* activeSkill,
         std::int32_t argument6,
         std::int32_t argument7) noexcept {
+    if (!IsNativeBehaviorActive()) {
+        return OriginalPlayerSkillUnitInput(
+            game, unit, targetType, targetGuid, activeSkill, argument6,
+            argument7);
+    }
     void* const target = game && GetServerUnit
         ? GetServerUnit(game, targetType, targetGuid)
         : nullptr;
@@ -1839,7 +2036,11 @@ std::int32_t __fastcall HookCastItemSkillOnTarget(
         std::int32_t skillLevel,
         void* target,
         std::int32_t flag) noexcept {
-    const bool inCastDispatch = Operational.load(std::memory_order_acquire)
+    if (!IsNativeBehaviorActive()) {
+        return OriginalCastItemSkillOnTarget(
+            caster, skillId, skillLevel, target, flag);
+    }
+    const bool inCastDispatch = IsNativeBehaviorActive()
         && CastDispatchDepth != 0;
     const bool sameLevel = inCastDispatch
         && skillLevel == SameLevelMarker
@@ -1938,7 +2139,11 @@ std::int32_t __fastcall HookCastItemSkillAtPosition(
         std::int32_t x,
         std::int32_t y,
         std::int32_t flag) noexcept {
-    const bool inCastDispatch = Operational.load(std::memory_order_acquire)
+    if (!IsNativeBehaviorActive()) {
+        return OriginalCastItemSkillAtPosition(
+            caster, skillId, skillLevel, x, y, flag);
+    }
+    const bool inCastDispatch = IsNativeBehaviorActive()
         && CastDispatchDepth != 0;
     const bool sameLevel = inCastDispatch
         && skillLevel == SameLevelMarker
@@ -1985,9 +2190,14 @@ std::int32_t __fastcall HookSkillHandler(
         std::int32_t consumeResources,
         std::int32_t itemCast,
         std::int32_t itemEffect) noexcept {
+    if (!IsNativeBehaviorActive()) {
+        return OriginalSkillHandler(
+            game, unit, skillId, skillLevel, consumeResources, itemCast,
+            itemEffect);
+    }
     const auto unitType = unit ? GetUnitType(unit) : 6;
     const bool preCastCandidate =
-        Operational.load(std::memory_order_acquire)
+        IsNativeBehaviorActive()
         && CastDispatchDepth == 0
         && ProcExecutionDepth == 0
         && !SourceTargetObservationActive
@@ -2029,7 +2239,7 @@ std::int32_t __fastcall HookSkillHandler(
             itemCast,
             itemEffect);
     }
-    if (!Operational.load(std::memory_order_acquire)
+    if (!IsNativeBehaviorActive()
             || CastDispatchDepth != 0) {
         return nativeResult;
     }
@@ -2183,7 +2393,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: Crushing Blow callback hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.criticalStrikeTrigger
+            && !Context->InstallInlineHook(
             FillDamageValuesRva,
             FillDamageValuesExpected.data(),
             static_cast<std::uint32_t>(FillDamageValuesExpected.size()),
@@ -2193,7 +2404,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: damage builder hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.criticalStrikeTrigger
+            && !Context->InstallInlineHook(
             CopyDamageRva,
             CopyDamageExpected.data(),
             static_cast<std::uint32_t>(CopyDamageExpected.size()),
@@ -2203,7 +2415,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: damage copy hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.criticalStrikeTrigger
+            && !Context->InstallInlineHook(
             MoveDamageRva,
             MoveDamageExpected.data(),
             static_cast<std::uint32_t>(MoveDamageExpected.size()),
@@ -2213,7 +2426,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: damage move hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.criticalStrikeTrigger
+            && !Context->InstallInlineHook(
             DestroyDamageRva,
             DestroyDamageExpected.data(),
             static_cast<std::uint32_t>(DestroyDamageExpected.size()),
@@ -2223,7 +2437,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: damage destructor hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.positionInput
+            && !Context->InstallInlineHook(
             PlayerSkillPositionInputRva,
             PlayerSkillPositionInputExpected.data(),
             static_cast<std::uint32_t>(
@@ -2245,7 +2460,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: player unit input executor hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.sourceSkillTriggers
+            && !Context->InstallInlineHook(
             GetTargetUnitRva,
             GetTargetUnitExpected.data(),
             static_cast<std::uint32_t>(GetTargetUnitExpected.size()),
@@ -2255,7 +2471,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: native target observer hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.sourceSkillTriggers
+            && !Context->InstallInlineHook(
             PathGetFirstPointXRva,
             PathGetFirstPointXExpected.data(),
             static_cast<std::uint32_t>(
@@ -2266,7 +2483,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: native target X observer hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.sourceSkillTriggers
+            && !Context->InstallInlineHook(
             PathGetFirstPointYRva,
             PathGetFirstPointYExpected.data(),
             static_cast<std::uint32_t>(
@@ -2277,7 +2495,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: native target Y observer hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.itemSkillExecution
+            && !Context->InstallInlineHook(
             CastItemSkillOnTargetRva,
             CastItemSkillOnTargetExpected.data(),
             static_cast<std::uint32_t>(
@@ -2288,7 +2507,8 @@ bool InstallHooks() noexcept {
             "CastTriggers: target item-skill caster hook is already owned or unavailable.");
         return false;
     }
-    if (!Context->InstallInlineHook(
+    if (Capabilities.itemSkillExecution
+            && !Context->InstallInlineHook(
             CastItemSkillAtPositionRva,
             CastItemSkillAtPositionExpected.data(),
             static_cast<std::uint32_t>(
@@ -2300,7 +2520,8 @@ bool InstallHooks() noexcept {
         return false;
     }
 
-    if (!Context->InstallInlineHook(
+    if (Capabilities.sourceSkillTriggers
+            && !Context->InstallInlineHook(
             SkillHandlerRva,
             SkillHandlerExpected.data(),
             static_cast<std::uint32_t>(SkillHandlerExpected.size()),
@@ -2311,6 +2532,158 @@ bool InstallHooks() noexcept {
         return false;
     }
     return true;
+}
+
+void LogNativeActivation(const D2RL::PluginContext* context,
+        std::uint64_t revision) noexcept {
+    if (!context) return;
+    const auto message = std::string(
+        "Cast Triggers " RUFFNECKK_CAST_VERSION
+        " by RuffnecKk active after DataTablesLoaded revision ")
+        + std::to_string(revision) + "; native fingerprint accepted; config="
+        + LoadedConfigPath + "; channeling="
+        + (Settings.whileChanneling.enabled
+                && HasConfiguredTriggerStat(Settings.whileChanneling.stats)
+            ? "enabled"
+            : "disabled")
+        + "; interval-frames="
+        + std::to_string(Settings.whileChanneling.intervalFrames)
+        + "; channel-stat-ids=fixed/same="
+        + std::to_string(Settings.whileChanneling.stats.fixedStatId)
+        + "/"
+        + std::to_string(Settings.whileChanneling.stats.sameLevelStatId)
+        + "; source-skill-rules="
+        + std::to_string(Settings.sourceSkillTriggers.size())
+        + "; combat-stat-ids=attack/critical/crushing/open="
+        + std::to_string(Settings.combatTriggers.attackAttemptStatId)
+        + "/"
+        + std::to_string(Settings.combatTriggers.criticalStrikeStatId)
+        + "/"
+        + std::to_string(Settings.combatTriggers.crushingBlowStatId)
+        + "/"
+        + std::to_string(Settings.combatTriggers.openWoundsStatId)
+        + "; diagnostics="
+        + (Settings.diagnostics ? "buffered" : "off")
+        + ".";
+    context->LogInfo(message.c_str());
+}
+
+void RefuseDeferredNativeActivation(const char* reason) noexcept {
+    Operational.store(false, std::memory_order_release);
+    if (TryTransitionNativeActivation(
+            DeferredNativeActivationTransition::Refuse)
+            && Context && reason) {
+        Context->LogError(reason);
+    }
+}
+
+void __cdecl OnDataTablesLoaded(
+        const D2RL::PluginContext* context,
+        const D2RL::Lifecycle::DataTablesLoadedEvent* event,
+        void* userData) noexcept {
+    if (!TryTransitionNativeActivation(
+            DeferredNativeActivationTransition::BeginInstalling)) {
+        return;
+    }
+
+    if (!Context || context != Context || userData != &NativeActivationState
+            || !D2RL::Lifecycle::HasDataTablesLoadedEventField(
+                event,
+                D2RL::Lifecycle::DataTablesLoadedEventRequiredSize)
+            || event->revision == 0) {
+        RefuseDeferredNativeActivation(
+            "CastTriggers: invalid DataTablesLoaded callback contract; native activation refused.");
+        return;
+    }
+
+    // Every current fingerprint is rechecked immediately before the first
+    // native write.  Nothing in D2RLoaderLoadPlugin classifies native bytes or
+    // installs a hook, so Crossbow Charges admits its own callable and slot
+    // witnesses against pristine EventFunc20 state in either load order.
+    if (!ValidateNativeFingerprint()) {
+        RefuseDeferredNativeActivation(
+            "CastTriggers: deferred native fingerprint rejected; plugin remains loaded and inert.");
+        return;
+    }
+    ResolveNativeFunctions();
+    if (!InstallHooks()) {
+        RefuseDeferredNativeActivation(
+            "CastTriggers: deferred hook installation failed; plugin remains loaded and inert.");
+        return;
+    }
+
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+    if (!OriginalDestroyDamage || !CleanupProvider.Publish(
+            Base + DestroyDamageRva,
+            DestroyDamageExpected,
+            CleanupOwnedDamage)) {
+        RefuseDeferredNativeActivation(
+            "CastTriggers: deferred damage cleanup contract publication failed; plugin remains loaded and inert.");
+        return;
+    }
+    Context->LogInfo(
+        "CastTriggers 1.0.2 candidate: damage cleanup ABI v1 ready; not release eligible.");
+#endif
+
+    if (!PublishNativeActivation()) {
+        return;
+    }
+    LogNativeActivation(Context, event->revision);
+}
+
+bool RegisterDeferredNativeActivation() noexcept {
+    LifecycleService = nullptr;
+    const auto result = Context->QueryService(
+        D2RL::ServiceId::Lifecycle,
+        D2RL::LifecycleServiceV1Version,
+        &LifecycleService);
+    if (result != D2RL::ServiceQueryResult::Success
+            || !D2RL::HasLifecycleServiceV1Field(
+                LifecycleService,
+                D2RL::LifecycleServiceV1RequiredSize)
+            || !LifecycleService->registerDataTablesLoadedListener
+            || !LifecycleService->unregisterDataTablesLoadedListener) {
+        Context->LogError(
+            "CastTriggers: LifecycleService v1 is unavailable; plugin refused before native writes.");
+        LifecycleService = nullptr;
+        return false;
+    }
+
+    const D2RL::Lifecycle::DataTablesLoadedListener listener{
+        .structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize,
+        .flags = 0,
+        .callback = &OnDataTablesLoaded,
+        .userData = &NativeActivationState,
+    };
+    D2RL::Lifecycle::ListenerHandle handle{
+        D2RL::Lifecycle::InvalidHandle};
+    if (LifecycleService->registerDataTablesLoadedListener(
+            Context, &listener, &handle) != D2RL::Lifecycle::Result::Success
+            || handle == D2RL::Lifecycle::InvalidHandle) {
+        Context->LogError(
+            "CastTriggers: DataTablesLoaded listener registration failed; plugin refused before native writes.");
+        LifecycleService = nullptr;
+        return false;
+    }
+    DataTablesLoadedListenerHandle.store(handle, std::memory_order_release);
+    return true;
+}
+
+void UnregisterDeferredNativeActivation() noexcept {
+    const auto handle = DataTablesLoadedListenerHandle.exchange(
+        D2RL::Lifecycle::InvalidHandle,
+        std::memory_order_acq_rel);
+    if (handle == D2RL::Lifecycle::InvalidHandle || !Context
+            || !LifecycleService) {
+        return;
+    }
+    const auto result = LifecycleService->unregisterDataTablesLoadedListener(
+        Context, handle);
+    if (result != D2RL::Lifecycle::Result::Success
+            && result != D2RL::Lifecycle::Result::NotFound) {
+        Context->LogWarn(
+            "CastTriggers: DataTablesLoaded listener removal failed; D2RLoader unload cleanup remains authoritative.");
+    }
 }
 
 auto Status(
@@ -2324,8 +2697,12 @@ auto Status(
     std::snprintf(
         summary,
         sizeof(summary),
-        "Cast Triggers " RUFFNECKK_CAST_VERSION ": %s; observed=%llu; eligible=%llu; cast dispatches=%llu; fixed procs=%llu; same-level procs=%llu; native-position procs=%llu; native-unit-target procs=%llu; config=%s.",
-        Operational.load(std::memory_order_acquire) ? "active" : "disabled",
+        "Cast Triggers " RUFFNECKK_CAST_VERSION ": %s; activation=%.*s; observed=%llu; eligible=%llu; cast dispatches=%llu; fixed procs=%llu; same-level procs=%llu; native-position procs=%llu; native-unit-target procs=%llu; config=%s.",
+        IsNativeBehaviorActive() ? "active" : "inactive",
+        static_cast<int>(DeferredNativeActivationStateName(
+            NativeActivationState.load(std::memory_order_acquire)).size()),
+        DeferredNativeActivationStateName(
+            NativeActivationState.load(std::memory_order_acquire)).data(),
         static_cast<unsigned long long>(
             ManualCastsObserved.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
@@ -2342,6 +2719,17 @@ auto Status(
             NativeUnitTargetProcs.load(std::memory_order_relaxed)),
         LoadedConfigPath.c_str());
     command->plugin->WriteConsoleMessage(summary);
+
+    char capabilities[320]{};
+    std::snprintf(
+        capabilities,
+        sizeof(capabilities),
+        "Cast Triggers capabilities: source-skill=%s; critical-strike=%s; position-input=%s; item-skill-execution=%s.",
+        Capabilities.sourceSkillTriggers ? "active" : "disabled by compatible foreign owner",
+        Capabilities.criticalStrikeTrigger ? "active" : "disabled by compatible foreign owner",
+        Capabilities.positionInput ? "active" : "disabled by compatible foreign owner",
+        Capabilities.itemSkillExecution ? "active" : "unavailable");
+    command->plugin->WriteConsoleMessage(capabilities);
 
     char cadence[768]{};
     std::snprintf(
@@ -2430,6 +2818,14 @@ auto Status(
 
 void ResetState() noexcept {
     Operational.store(false, std::memory_order_release);
+    NativeActivationState.store(
+        DeferredNativeActivationState::Pending,
+        std::memory_order_release);
+    LifecycleService = nullptr;
+    DataTablesLoadedListenerHandle.store(
+        D2RL::Lifecycle::InvalidHandle,
+        std::memory_order_release);
+    Capabilities = {true, true, true, true, true};
     CastDispatchDepth = 0;
     ProcExecutionDepth = 0;
     ActiveSourceTrigger = SourceTriggerKind::None;
@@ -2515,7 +2911,11 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-cast-triggers",
     .name = "Cast Triggers",
-    .version = "1.1.0",
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+    .version = "1.0.2",
+#else
+    .version = "1.1.1",
+#endif
     .author = "RuffnecKk",
     .description =
         "Triggers item skills from spells, attack attempts, and combat outcomes.",
@@ -2529,10 +2929,22 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept
     return &Info;
 }
 
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+D2RL_PLUGIN_EXPORT auto RuffnecKkCastTriggersGetDamageCleanupApi(
+        std::uint32_t version, std::uint32_t size) noexcept
+        -> const RuffnecKk::DamageCleanup::ApiV1* {
+    return version == RuffnecKk::DamageCleanup::Version
+            && size == sizeof(RuffnecKk::DamageCleanup::ApiV1)
+        ? &RuffnecKk::CastTriggers::CleanupApi : nullptr;
+}
+#endif
 
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         const D2RL::PluginContext* context) noexcept -> bool {
     using namespace RuffnecKk::CastTriggers;
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+    CleanupProvider.Stop();
+#endif
     Context = context;
     Base = context ? reinterpret_cast<std::uint8_t*>(context->exeBase) : nullptr;
     NativeStats.Reset();
@@ -2548,11 +2960,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         context->LogInfo(message.c_str());
         return true;
     }
-    if (!ValidateNativeFingerprint()) return false;
-    ResolveNativeFunctions();
-    if (!InstallHooks()) return false;
-
-    Operational.store(true, std::memory_order_release);
     if (!context->RegisterConsoleCommand(
             "cast-triggers",
             Status,
@@ -2560,39 +2967,21 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         context->LogWarn(
             "CastTriggers: status command could not be registered.");
     }
-    const auto message = std::string(
-        "Cast Triggers " RUFFNECKK_CAST_VERSION " by RuffnecKk active; native fingerprint accepted; config=")
-        + LoadedConfigPath + "; channeling="
-        + (Settings.whileChanneling.enabled
-                && HasConfiguredTriggerStat(Settings.whileChanneling.stats)
-            ? "enabled"
-            : "disabled")
-        + "; interval-frames="
-        + std::to_string(Settings.whileChanneling.intervalFrames)
-        + "; channel-stat-ids=fixed/same="
-        + std::to_string(Settings.whileChanneling.stats.fixedStatId)
-        + "/"
-        + std::to_string(Settings.whileChanneling.stats.sameLevelStatId)
-        + "; source-skill-rules="
-        + std::to_string(Settings.sourceSkillTriggers.size())
-        + "; combat-stat-ids=attack/critical/crushing/open="
-        + std::to_string(Settings.combatTriggers.attackAttemptStatId)
-        + "/"
-        + std::to_string(Settings.combatTriggers.criticalStrikeStatId)
-        + "/"
-        + std::to_string(Settings.combatTriggers.crushingBlowStatId)
-        + "/"
-        + std::to_string(Settings.combatTriggers.openWoundsStatId)
-        + "; diagnostics="
-        + (Settings.diagnostics ? "buffered" : "off")
-        + ".";
-    context->LogInfo(message.c_str());
+    if (!RegisterDeferredNativeActivation()) return false;
+    context->LogInfo(
+        "CastTriggers: native activation is pending DataTablesLoaded; no fingerprint or hook ran during plugin load.");
     return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+    RuffnecKk::CastTriggers::TryTransitionNativeActivation(
+        ruffneckk::cast_triggers::DeferredNativeActivationTransition::BeginStopping);
     RuffnecKk::CastTriggers::Operational.store(
         false,
         std::memory_order_release);
+    RuffnecKk::CastTriggers::UnregisterDeferredNativeActivation();
+#if defined(RUFFNECKK_DAMAGE_CLEANUP_V1)
+    RuffnecKk::CastTriggers::CleanupProvider.Stop();
+#endif
     RuffnecKk::CastTriggers::NativeStats.Reset();
 }

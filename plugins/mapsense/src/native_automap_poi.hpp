@@ -66,9 +66,10 @@ inline constexpr std::uint8_t AutomapPoiStateTrapped = 1U << 1U;
 // D2R's automap cell. These extents/margins are 2160p reference measurements;
 // the renderer resolves them through AutomapLabelMetrics for its live viewport.
 inline constexpr float NativeExitIconTopExtent = 26.0F;
-inline constexpr float NativeWaypointIconTopExtent = 24.0F;
+// Compact label reservation above the waypoint origin; does not resize its sprite.
+inline constexpr float NativeWaypointLabelTopExtent = 14.0F;
 inline constexpr float NativeShrineIconTopExtent = 44.0F;
-inline constexpr float NativeAutomapLabelGap = 12.0F;
+inline constexpr float NativeAutomapLabelGap = 2.0F;
 inline constexpr float NativeWaypointLabelGap = 2.0F;
 inline constexpr float NativeShrineLabelGap = 18.0F;
 inline constexpr std::int32_t NativeShrineLabelProximitySubtiles = 56;
@@ -118,6 +119,31 @@ struct AutomapLabelRectangle final {
         && left.right + padding > right.left
         && left.top < right.bottom + padding
         && left.bottom + padding > right.top;
+}
+
+[[nodiscard]] constexpr auto AutomapLabelClearsIcon(
+        const AutomapLabelRectangle& label,
+        float originY, float topExtent, float gap) noexcept -> bool {
+    return label.bottom <= originY - topExtent
+        || label.top >= originY + gap;
+}
+
+// Search the closest rows first, never more than two rows from the clamped
+// anchor. Crowded labels may be omitted instead of drifting to another exit.
+[[nodiscard]] inline auto NearAutomapLabelCandidates(
+        const AutomapLabelRectangle& anchor,
+        float viewportHeight,
+        float spacing) noexcept -> std::array<AutomapLabelRectangle, 5> {
+    const auto height = anchor.bottom - anchor.top;
+    const auto separation = height + spacing;
+    constexpr std::array rows{0.0F, -1.0F, 1.0F, -2.0F, 2.0F};
+    std::array<AutomapLabelRectangle, rows.size()> candidates{};
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        const auto top = std::clamp(anchor.top + rows[index] * separation,
+            0.0F, std::max(0.0F, viewportHeight - height));
+        candidates[index] = {anchor.left, top, anchor.right, top + height};
+    }
+    return candidates;
 }
 
 [[nodiscard]] constexpr auto AutomapLabelTopAboveIcon(

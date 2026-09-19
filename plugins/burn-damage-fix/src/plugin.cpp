@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <D2RLPlugin/api.h>
 #include <RuffnecKk/native_stat_compat.hpp>
+#include <RuffnecKk/tracked_native_transform_d2rl.hpp>
 
 #include "burn_damage_fix_policy.hpp"
 
@@ -409,7 +410,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-burn-damage-fix",
     .name = "Burn Damage Fix",
-    .version = "1.1.0",
+    .version = "1.1.1",
     .author = "RuffnecKk",
     .description = "Restores Burn damage and Fire defenses with a moving periodic flame.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -781,7 +782,8 @@ auto ValidateRuntime() noexcept -> bool {
         && !NativeStats.BindCurrentProcess(
             reinterpret_cast<std::uintptr_t>(Base),
             RuffnecKk::NativeStatCompat::ToMask(
-                RuffnecKk::NativeStatCompat::Helper::GetUnitStat))) {
+                RuffnecKk::NativeStatCompat::Helper::GetUnitStat),
+            RuffnecKk::TrackedNativeTransform::D2RLDiagnosticsContext(Context))) {
         char message[192]{};
         std::snprintf(message, sizeof(message),
             "BurnDamageFix: unit-stat compatibility admission failed (%s); plugin refused.",
@@ -1445,7 +1447,7 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Burn Damage Fix 1.1.0: active=%s; build=%s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s/%llu/%llu/%llu/%llu/%llu removed/already-none/custom/fail/restored; diagnostics=%s; production=%llu/%llu; resolved=%llu/%llu/%llu applied/cancelled/fail; burning-state=%llu/%llu active/missing; overlay-replay=%llu/%llu/%llu replayed/cadence/foreign-replaced; config=%s.",
+        "Burn Damage Fix 1.1.1: active=%s; build=%s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s/%llu/%llu/%llu/%llu/%llu removed/already-none/custom/fail/restored; diagnostics=%s; production=%llu/%llu; resolved=%llu/%llu/%llu applied/cancelled/fail; burning-state=%llu/%llu active/missing; overlay-replay=%llu/%llu/%llu replayed/cadence/foreign-replaced; config=%s.",
         Operational.load(std::memory_order_acquire) ? "true" : "false",
         RuntimeBuild.c_str(),
         Settings.normalizeGenericBurn ? "on" : "off",
@@ -1609,7 +1611,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
     if (!Settings.enabled) {
         context->LogInfo(
-            "Burn Damage Fix 1.1.0 by RuffnecKk loaded disabled; no hook was installed.");
+            "Burn Damage Fix 1.1.1 by RuffnecKk loaded disabled; no hook was installed.");
         return true;
     }
 
@@ -1677,7 +1679,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         message,
         sizeof(message),
-        "Burn Damage Fix 1.1.0 by RuffnecKk active for observed D2R %s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s; installation=%s; TOML=%s.",
+        "Burn Damage Fix 1.1.1 by RuffnecKk active for observed D2R %s; generic=%s; resistance=%s; overlay=%s/fire_hit/%df; native-burning=%s; installation=%s; TOML=%s.",
         RuntimeBuild.c_str(),
         Settings.normalizeGenericBurn ? "enabled" : "disabled",
         Settings.applyFireResistance ? "enabled" : "disabled",

@@ -356,7 +356,7 @@ inline std::string BuildButtonLayoutJson(const ButtonConfig& config) {
     json += "    \"pressedFrame\": " + std::to_string(config.pressedFrame) + ",\n";
     json += "    \"disabledFrame\": " + std::to_string(config.disabledFrame) + ",\n";
     json += "    \"hoveredFrame\": " + std::to_string(config.hoveredFrame) + ",\n";
-    json += "    \"tooltipString\": \"@OpenCurrentStashLegend\",\n";
+    json += "    \"tooltipString\": \"@d2r:OpenCurrentStashLegend\",\n";
     json += "    \"onClickMessage\": \"PanelManager:OpenPanel:RuffnecKkRemoteStash\"\n";
     json += "  }\n}\n";
     return json;

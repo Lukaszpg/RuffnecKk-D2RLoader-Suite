@@ -1,6 +1,6 @@
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.28)
-    project(RuffnecKkEtherealItemRules LANGUAGES CXX RC)
+    project(RuffnecKkEtherealItemRules VERSION 1.0.3 LANGUAGES CXX RC)
     include(CTest)
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
     add_subdirectory(../../common "${CMAKE_BINARY_DIR}/_deps/common")
@@ -31,5 +31,6 @@ if(BUILD_TESTING)
         NAME ruffneckk.ethereal-item-rules.policy
         COMMAND ruffneckk_ethereal_item_rules_tests
             "${CMAKE_CURRENT_SOURCE_DIR}/config/ruffneckk-ethereal-item-rules.toml"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin.cpp"
     )
 endif()

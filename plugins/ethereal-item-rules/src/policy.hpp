@@ -42,6 +42,47 @@ struct Config {
     bool diagnosticsEnabled{};
 };
 
+enum class ExclusionState : std::uint8_t {
+    Disabled,
+    Pending,
+    Installing,
+    Active,
+    Refused,
+    Stopping,
+};
+
+inline constexpr auto IsExclusionHookActive(ExclusionState state) noexcept -> bool {
+    return state == ExclusionState::Active;
+}
+
+inline constexpr auto IsValidExclusionTransition(
+    ExclusionState from,
+    ExclusionState to
+) noexcept -> bool {
+    if (from == to) return true;
+    switch (from) {
+    case ExclusionState::Disabled:
+        return to == ExclusionState::Pending
+            || to == ExclusionState::Refused
+            || to == ExclusionState::Stopping;
+    case ExclusionState::Pending:
+        return to == ExclusionState::Installing
+            || to == ExclusionState::Refused
+            || to == ExclusionState::Stopping;
+    case ExclusionState::Installing:
+        return to == ExclusionState::Active
+            || to == ExclusionState::Refused
+            || to == ExclusionState::Stopping;
+    case ExclusionState::Active:
+        return to == ExclusionState::Stopping;
+    case ExclusionState::Refused:
+        return to == ExclusionState::Stopping;
+    case ExclusionState::Stopping:
+        return false;
+    }
+    return false;
+}
+
 inline auto Trim(std::string_view value) noexcept -> std::string_view {
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t'
             || value.front() == '\r')) {

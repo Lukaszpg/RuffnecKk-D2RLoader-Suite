@@ -49,28 +49,6 @@
       "dynamicAllocations": []
     },
     {
-      "id": "ruffneckk-charm-aura-trigger-fix",
-      "source": "plugins/charm-aura-trigger-fix/src/plugin.cpp",
-      "fixedWrites": [
-        {
-          "rva": "0x502D00",
-          "size": 5,
-          "kind": "sdk-inline-hook"
-        },
-        {
-          "rva": "0x491960",
-          "size": 5,
-          "kind": "sdk-inline-hook"
-        },
-        {
-          "rva": "0x42D2C0",
-          "size": 5,
-          "kind": "sdk-inline-hook"
-        }
-      ],
-      "dynamicAllocations": []
-    },
-    {
       "id": "ruffneckk-enhanced-damage-min-max-fix",
       "source": "plugins/enhanced-damage-min-max-fix/src/plugin.cpp",
       "fixedWrites": [
@@ -351,7 +329,7 @@
       "source": "plugins/equipped-item-to-cube/src/plugin.cpp",
       "fixedWrites": [
         {
-          "rva": "0x0EE2A0",
+          "rva": "0x0EC820",
           "size": 5,
           "kind": "sdk-inline-hook"
         },
@@ -854,27 +832,32 @@
         {
           "rva": "0x44C030",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "critical-strike trigger capability available"
         },
         {
           "rva": "0x4494B0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "critical-strike trigger capability available"
         },
         {
           "rva": "0x449760",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "critical-strike trigger capability available"
         },
         {
           "rva": "0x4496E0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "critical-strike trigger capability available"
         },
         {
           "rva": "0x4FDB40",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "position-input capability available"
         },
         {
           "rva": "0x4F8DE0",
@@ -884,32 +867,38 @@
         {
           "rva": "0x48FE20",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "source-skill trigger capability available"
         },
         {
           "rva": "0x341CC0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "source-skill trigger capability available"
         },
         {
           "rva": "0x341CD0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "source-skill trigger capability available"
         },
         {
           "rva": "0x5896E0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "item-skill-execution capability available"
         },
         {
           "rva": "0x589820",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "item-skill-execution capability available"
         },
         {
           "rva": "0x43ACB0",
           "size": 5,
-          "kind": "sdk-inline-hook"
+          "kind": "sdk-inline-hook",
+          "condition": "source-skill trigger capability available"
         }
       ],
       "dynamicAllocations": []
@@ -1615,20 +1604,9 @@
   ],
   "composableCallThroughs": [
     {
-      "entryRva": "0x0EE2A0",
-      "ownerPluginId": "ruffneckk-equipped-item-to-cube",
-      "consumerPluginIds": [
-        "ruffneckk-mass-identify",
-        "ruffneckk-remote-stash"
-      ],
-      "consumerContract": "call-current-live-entry",
-      "requiresVanillaEntry": false
-    },
-    {
       "entryRva": "0x373890",
       "ownerPluginId": "ruffneckk-ethereal-item-rules",
       "consumerPluginIds": [
-        "ruffneckk-charm-aura-trigger-fix",
         "ruffneckk-enhanced-damage-min-max-fix",
         "ruffneckk-progressive-affixes"
       ],

@@ -3481,6 +3481,7 @@ void CheckNavigationPolicyContract() {
         QuestPresetRegression{93, 2U, 405},
         QuestPresetRegression{94, 2U, 193},
         QuestPresetRegression{83, 2U, 404},
+        QuestPresetRegression{105, 1U, 256},
         QuestPresetRegression{107, 2U, 376},
         QuestPresetRegression{
             111,
@@ -3505,6 +3506,25 @@ void CheckNavigationPolicyContract() {
     CHECK(!StaticQuestPresetTargetFor(4, 2U, 30).has_value());
     CHECK(!StaticQuestPresetTargetFor(78, 2U, 407).has_value());
     CHECK(!StaticQuestPresetTargetFor(111, 2U, -1).has_value());
+
+    const std::array plainsOfDespairExit{
+        NavigationExitCandidate{105'106U, 106, 5'700, 5'800},
+    };
+    const std::array izualQuestTarget{
+        NavigationPointCandidate{105'256U, 5'400, 5'500},
+    };
+    std::array<NavigationSubtileDestination, 4U> plainsDestinations{};
+    CHECK(BuildNavigationDestinations(
+        NavigationPolicyInput{
+            .currentLevelId = 105,
+            .exits = plainsOfDespairExit,
+            .questTargets = izualQuestTarget,
+        },
+        plainsDestinations) == 2U);
+    CHECK(plainsDestinations[0].kind == NavigationLineKind::Progression);
+    CHECK(plainsDestinations[0].destinationId == 105'106U);
+    CHECK(plainsDestinations[1].kind == NavigationLineKind::Quest);
+    CHECK(plainsDestinations[1].destinationId == 105'256U);
 
     std::int32_t converted{};
     CHECK(CheckedNavigationSubtileCoordinate(1085, 0, converted));
@@ -5487,15 +5507,16 @@ void CheckAutomapLabelResolutionPolicy() {
     // Expected screen pixels, independent of monitor DPI or menu size.
     // Revisit prior resolutions to catch a cached or compounded scale.
     constexpr std::array cases{
-        Case{{3840.0F, 2160.0F}, 28.0F, 62.0F, 38.0F},
-        Case{{1920.0F, 1080.0F}, 14.0F, 31.0F, 19.0F},
-        Case{{1280.0F, 720.0F}, 12.0F, 62.0F / 3.0F, 38.0F / 3.0F},
-        Case{{2560.0F, 1440.0F}, 56.0F / 3.0F, 124.0F / 3.0F, 76.0F / 3.0F},
-        Case{{3440.0F, 1440.0F}, 56.0F / 3.0F, 124.0F / 3.0F, 76.0F / 3.0F},
-        Case{{3840.0F, 2160.0F}, 28.0F, 62.0F, 38.0F},
-        Case{{1920.0F, 1080.0F}, 14.0F, 31.0F, 19.0F},
-        Case{{1600.0F, 900.0F}, 12.0F, 155.0F / 6.0F, 95.0F / 6.0F},
-        Case{{7680.0F, 4320.0F}, 56.0F, 124.0F, 76.0F},
+        Case{{3840.0F, 2160.0F}, 28.0F, 62.0F, 28.0F},
+        Case{{1920.0F, 1080.0F}, 14.0F, 31.0F, 14.0F},
+        Case{{2048.0F, 1080.0F}, 14.0F, 31.0F, 14.0F},
+        Case{{1280.0F, 720.0F}, 12.0F, 62.0F / 3.0F, 29.0F / 3.0F},
+        Case{{2560.0F, 1440.0F}, 56.0F / 3.0F, 124.0F / 3.0F, 56.0F / 3.0F},
+        Case{{3440.0F, 1440.0F}, 56.0F / 3.0F, 124.0F / 3.0F, 56.0F / 3.0F},
+        Case{{3840.0F, 2160.0F}, 28.0F, 62.0F, 28.0F},
+        Case{{1920.0F, 1080.0F}, 14.0F, 31.0F, 14.0F},
+        Case{{1600.0F, 900.0F}, 12.0F, 155.0F / 6.0F, 71.0F / 6.0F},
+        Case{{7680.0F, 4320.0F}, 56.0F, 124.0F, 56.0F},
     };
     for (const auto& value : cases) {
         const auto metrics = ResolveAutomapLabelMetrics(value.viewport, 1.0F);
@@ -5552,6 +5573,134 @@ void CheckAutomapLabelResolutionPolicy() {
             Vec2{1920.0F, std::numeric_limits<float>::quiet_NaN()},
             Vec2{1920.0F, std::numeric_limits<float>::infinity()}}) {
         CHECK(ResolveAutomapLabelMetrics(invalid, 1.0F).resolutionScale == 1.0F);
+    }
+}
+
+void CheckNearAutomapLabelPlacement() {
+    using namespace RuffnecKk::MapSense;
+    constexpr std::array viewports{
+        Vec2{1280, 720}, Vec2{1920, 1080}, Vec2{2048, 1080},
+        Vec2{2560, 1440}, Vec2{3440, 1440}, Vec2{3840, 2160},
+        Vec2{5120, 1440}, Vec2{7680, 4320}, Vec2{800, 600},
+    };
+    for (const auto viewport : viewports) {
+        for (const float userScale : {0.5F, 1.0F, 2.0F}) {
+            const auto metrics = ResolveAutomapLabelMetrics(viewport, userScale);
+            for (const float referenceSize : {8.0F, 28.0F, 72.0F}) {
+                const auto height = metrics.TextSize(referenceSize);
+                const auto spacing = metrics.Spacing(5.0F);
+                const auto separation = height + spacing;
+                const auto padding = metrics.Spacing(3.0F);
+                const auto extent = metrics.IconTopExtent(NativeExitIconTopExtent);
+                const auto gap = metrics.Spacing(NativeAutomapLabelGap);
+                for (const float originY : {0.0F, viewport.y * 0.5F, viewport.y - 1}) {
+                    const auto top = std::clamp(AutomapLabelTopAboveIcon(
+                        originY, height, extent, gap), 0.0F, viewport.y - height);
+                    // Include long localized labels near the left/right edges.
+                    for (const float width : {80.0F, viewport.x - 2.0F}) {
+                        const AutomapLabelRectangle anchor{1, top, 1 + width, top + height};
+                        const auto candidates = NearAutomapLabelCandidates(
+                            anchor, viewport.y, spacing);
+                        CHECK(candidates.size() == 5U);
+                        CHECK(candidates[0].top == anchor.top);
+                        for (const auto& candidate : candidates) {
+                            CHECK(candidate.top >= 0);
+                            CHECK(candidate.bottom <= viewport.y + 0.001F);
+                            CHECK(std::abs(candidate.top - anchor.top)
+                                <= 2 * separation + 0.001F);
+                            CHECK(candidate.left == anchor.left);
+                            CHECK(candidate.right == anchor.right);
+                        }
+                        if (originY != viewport.y * 0.5F) continue;
+                        CHECK(AutomapLabelClearsIcon(candidates[0], originY, extent, gap));
+                        CHECK(candidates[1].top < candidates[0].top);
+                        CHECK(candidates[2].top > candidates[0].top);
+                        CHECK(candidates[3].top < candidates[1].top);
+                        CHECK(candidates[4].top > candidates[2].top);
+                        // An occupied anchor selects the next nearby clear row.
+                        CHECK(!AutomapLabelRectanglesOverlap(
+                            candidates[0], candidates[1], padding));
+                        CHECK(AutomapLabelClearsIcon(candidates[1], originY, extent, gap));
+                    }
+                }
+                const AutomapLabelRectangle overIcon{1, viewport.y * 0.5F - 1,
+                    50, viewport.y * 0.5F + height};
+                CHECK(!AutomapLabelClearsIcon(overIcon, viewport.y * 0.5F, extent, gap));
+            }
+        }
+    }
+}
+
+void CheckExitLabelViewportPolicy() {
+    using namespace RuffnecKk::MapSense;
+    struct Case final { Vec2 display; float fullOffset; float miniOffset; };
+    constexpr std::array cases{
+        Case{{1280, 720}, 29.0F / 3.0F, 19.0F / 6.0F},
+        Case{{1920, 1080}, 14.0F, 4.25F},
+        Case{{2048, 1080}, 14.0F, 4.25F},
+        Case{{2560, 1440}, 56.0F / 3.0F, 16.0F / 3.0F},
+        Case{{3440, 1440}, 56.0F / 3.0F, 16.0F / 3.0F},
+        Case{{3840, 2160}, 28.0F, 7.5F},
+    };
+    for (const auto& value : cases) {
+        const auto metrics = ResolveAutomapLabelMetrics(value.display, 1.0F);
+        // Revisit full-map mode to catch a retained minimap scale after toggling.
+        for (const auto mini : {false, true, false}) {
+            const auto fraction = mini ? 0.25F : 1.0F;
+            const auto viewportScale = ResolveNativeAutomapViewportScale(
+                static_cast<int>(value.display.x), static_cast<int>(value.display.y),
+                static_cast<int>(value.display.x * fraction),
+                static_cast<int>(value.display.y * fraction));
+            const auto extent = metrics.IconTopExtentForViewport(
+                NativeExitIconTopExtent, viewportScale);
+            const auto gap = metrics.SpacingForViewport(NativeAutomapLabelGap, viewportScale);
+            const auto expected = mini ? value.miniOffset : value.fullOffset;
+            const auto height = metrics.TextSize(28.0F);
+            const auto origin = value.display.y * 0.5F;
+            const auto top = AutomapLabelTopAboveIcon(origin, height, extent, gap);
+            CHECK(std::abs(origin - top - height - expected) < 0.001F);
+            const AutomapLabelRectangle anchor{100, top, 300, top + height};
+            CHECK(AutomapLabelClearsIcon(anchor, origin, extent, gap));
+            const auto candidates = NearAutomapLabelCandidates(
+                anchor, value.display.y, metrics.Spacing(5.0F));
+            CHECK(AutomapLabelClearsIcon(candidates[1], origin, extent, gap));
+        }
+    }
+}
+
+void CheckWaypointLabelResolutionPolicy() {
+    using namespace RuffnecKk::MapSense;
+    struct Case final { Vec2 viewport; float fullOffset; float miniOffset; };
+    constexpr std::array cases{
+        Case{{1280, 720}, 17.0F / 3.0F, 13.0F / 6.0F},
+        Case{{1920, 1080}, 8.0F, 2.75F},
+        Case{{2048, 1080}, 8.0F, 2.75F},
+        Case{{2560, 1440}, 32.0F / 3.0F, 10.0F / 3.0F},
+        Case{{3440, 1440}, 32.0F / 3.0F, 10.0F / 3.0F},
+        Case{{3840, 2160}, 16.0F, 4.5F},
+        Case{{7680, 4320}, 32.0F, 8.0F},
+        Case{{2560, 1440}, 32.0F / 3.0F, 10.0F / 3.0F},
+    };
+    for (const auto& value : cases) {
+        for (const float mapScale : {1.0F, 0.25F}) {
+            const auto metrics = ResolveAutomapLabelMetrics(value.viewport, 1.0F);
+            const auto extent = metrics.IconTopExtentForViewport(
+                NativeWaypointLabelTopExtent, mapScale);
+            const auto gap = metrics.SpacingForViewport(NativeWaypointLabelGap, mapScale);
+            const auto expected = mapScale == 1.0F ? value.fullOffset : value.miniOffset;
+            for (const float textSize : {8.0F, 28.0F, 72.0F}) {
+                const auto height = metrics.TextSize(textSize);
+                const auto origin = value.viewport.y * 0.5F;
+                const auto top = AutomapLabelTopAboveIcon(origin, height, extent, gap);
+                CHECK(std::abs(origin - top - height - expected) < 0.001F);
+                const AutomapLabelRectangle anchor{100, top, 300, top + height};
+                CHECK(AutomapLabelClearsIcon(anchor, origin, extent, gap));
+                const auto candidates = NearAutomapLabelCandidates(
+                    anchor, value.viewport.y, metrics.Spacing(5.0F));
+                CHECK(AutomapLabelClearsIcon(candidates[1], origin, extent, gap));
+                CHECK(!AutomapLabelRectanglesOverlap(anchor, candidates[1], metrics.Spacing(3.0F)));
+            }
+        }
     }
 }
 
@@ -5668,6 +5817,9 @@ int main(int argc, char** argv) {
     CheckAutomapLevelCatalogContract();
     CheckTownWaypointLabelPolicy();
     CheckAutomapLabelResolutionPolicy();
+    CheckNearAutomapLabelPlacement();
+    CheckWaypointLabelResolutionPolicy();
+    CheckExitLabelViewportPolicy();
 
     static_assert(CurrentConfigSchemaVersion == 18);
     static_assert(MenuThemes.size() == 10U);
@@ -5700,20 +5852,20 @@ int main(int argc, char** argv) {
     static_assert(!ShouldProjectAutomapLevelLabel(75, 75, false, false));
     static_assert(!ShouldProjectAutomapLevelLabel(80, 75, true, false));
     static_assert(!ShouldProjectAutomapLevelLabel(80, 75, false, true));
-    static_assert(NativeAutomapLabelGap == 12.0F);
+    static_assert(NativeAutomapLabelGap == 2.0F);
     static_assert(
         AutomapPoiCollectionBit(AutomapPoiCollection::WaypointLabels)
             == (1U << 6U));
     static_assert(AutomapLabelTopAboveIcon(
         100.0F,
         20.0F,
-        NativeWaypointIconTopExtent,
-        NativeWaypointLabelGap) == 54.0F);
+        NativeWaypointLabelTopExtent,
+        NativeWaypointLabelGap) == 64.0F);
     static_assert(AutomapLabelTopAboveIcon(
         100.0F,
         20.0F,
         NativeShrineIconTopExtent,
-        NativeAutomapLabelGap) == 24.0F);
+        NativeAutomapLabelGap) == 34.0F);
     static_assert(Detail::IsMonStatsLookupSafe(0U, 0U, 801, 802U));
     static_assert(!Detail::IsMonStatsLookupSafe(4U, 4U, 1, 802U));
     static_assert(!Detail::IsMonStatsLookupSafe(0U, 1U, 1, 802U));

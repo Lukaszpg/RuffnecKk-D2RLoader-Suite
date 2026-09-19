@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.1] - Unreleased
+
+- Improved compatibility with CelestialRay's Suite across the known plugin overlaps.
+- Updated MapSense 2.0.1 with Izual navigation, clearer map labels, improved renderer startup and Engine Stability compatibility.
+- Fixed Equipped Item to Cube 1.0.4 under D2RLoader 1.3.
+- Fixed the Remote Stash 2.3.2 Inventory button under D2RLoader 1.3.
+- Updated Armageddon-Hurricane CtC Fix, Bulk Currency Deposit, Burn Damage Fix, Cast Triggers, Ethereal Item Rules, Floating Damage, Larzuk Sockets, MassID, PlayerX Scaling Tweaks and Prevent Merc Death in Town for safer coexistence.
+- Retired Charm Aura Trigger Fix in favor of the external CelestialRayOne Aura Reactivation plugin.
+- Preserved existing TOML and JSON configuration files during updates.
+
 ## [1.4.0] - 2026-09-17
 
 Suite 1.4 updates the following plugins for D2RLoader 1.3:

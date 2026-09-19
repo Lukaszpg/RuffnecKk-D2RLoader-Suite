@@ -4,6 +4,7 @@
 #include <D2RLPlugin/item.h>
 #include <RuffnecKk/localization.hpp>
 #include <RuffnecKk/native_stat_compat.hpp>
+#include <RuffnecKk/tracked_native_transform_d2rl.hpp>
 #include <D2RLPlugin/shared_events.h>
 
 #include "policy.hpp"
@@ -299,7 +300,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-mass-identify",
     .name = "MassID",
-    .version = "2.1.0",
+    .version = "2.1.1",
     .author = "RuffnecKk",
     .description = "Identifies selected item containers from an Identify Tome.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -532,7 +533,8 @@ auto ValidateRuntime() noexcept -> bool {
     const bool nativeStatsValid = NativeStats.BindCurrentProcess(
         reinterpret_cast<std::uintptr_t>(Base),
         RuffnecKk::NativeStatCompat::ToMask(
-            RuffnecKk::NativeStatCompat::Helper::GetUnitStat));
+            RuffnecKk::NativeStatCompat::Helper::GetUnitStat),
+        RuffnecKk::TrackedNativeTransform::D2RLDiagnosticsContext(Context));
     if (!nativeStatsValid) {
         char message[192]{};
         std::snprintf(message, sizeof(message),

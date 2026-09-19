@@ -21,6 +21,8 @@ auto Read(void* userData, std::uintptr_t address, std::byte* output, std::size_t
     return ReadImage(images.main, address, output, size) || ReadImage(images.core, address, output, size);
 }
 auto ValidateUnwind(void* userData, std::uintptr_t, std::uint32_t, std::size_t, std::uint32_t, bool) noexcept -> bool { return static_cast<const Images*>(userData)->unwind; }
+auto ValidateExecutable(void*, std::uintptr_t) noexcept -> bool { return true; }
+auto ValidateNotExecutable(void*, std::uintptr_t) noexcept -> bool { return false; }
 void Put64(Image& image, std::size_t offset, std::uint64_t value) { std::memcpy(image.bytes.data() + offset, &value, sizeof(value)); }
 struct CanonicalCapture final { std::uintptr_t base{0x80000000}; std::vector<std::byte> bytes{0x340000}; };
 auto ReadCapture(void* userData, std::uintptr_t address, std::byte* output, std::size_t size) noexcept -> bool {
@@ -70,7 +72,13 @@ constexpr std::array<Stat::DirectCallWitness, 1> Jump8{{{0x140, 0x170}}};
 constexpr std::array<Stat::IndirectCallWitness, 1> Indirect{{{0x120, 0x180}}};
 constexpr std::array<Stat::ReadOnlyWitness, 1> ReadOnly{{{0x160, "CAFE"}}};
 constexpr std::array<Stat::FunctionWitness, 4> Functions{{
-    {0x100, "E80B000000", {0x150, "0102"}, Direct, {}, ReadOnly},
+    {0x100, "E80B0000009090909090", {0x150, "0102"}, Direct, {}, ReadOnly, 5},
+    {0x120, "FF155A000000", {0, ""}, {}, Indirect, {}},
+    {0x130, "E90B000000", {0, ""}, Jump32, {}, {}},
+    {0x140, "EB2E", {0, ""}, Jump8, {}, {}},
+}};
+constexpr std::array<Stat::FunctionWitness, 4> TrackedFunctions{{
+    {0x100, "E80B000000", {0x150, "0102"}, {}, {}, ReadOnly},
     {0x120, "FF155A000000", {0, ""}, {}, Indirect, {}},
     {0x130, "E90B000000", {0, ""}, Jump32, {}, {}},
     {0x140, "EB2E", {0, ""}, Jump8, {}, {}},
@@ -83,12 +91,35 @@ constexpr std::array<Stat::HelperWitness, 7> ProviderHelpers{{
     {"set", 0x60, "AABB", 6, "", "", 0, 0, {}, {}}, {"alignment", 0x70, "AABB", 10, "90909090", "CC", 0x220, 0x100, Functions, Imports},
 }};
 constexpr Stat::AdmissionContract ProviderContract{"synthetic-provider", ProviderHelpers};
+struct ObservationCapture final {
+    RuffnecKk::TrackedNativeTransform::Observation observation{};
+    bool returnObservation{true};
+    std::uintptr_t observedMain{};
+    std::uintptr_t observedTarget{};
+    std::size_t observedExpectedSize{};
+};
+auto ObserveTransform(void* userData, std::uintptr_t mainImageBase,
+        std::uintptr_t targetAddress, std::span<const std::byte> expected,
+        RuffnecKk::TrackedNativeTransform::Observation& observation) noexcept -> bool {
+    auto& capture = *static_cast<ObservationCapture*>(userData);
+    capture.observedMain = mainImageBase;
+    capture.observedTarget = targetAddress;
+    capture.observedExpectedSize = expected.size();
+    observation = capture.observation;
+    return capture.returnObservation;
+}
+auto CompatibleObservation() noexcept -> RuffnecKk::TrackedNativeTransform::Observation {
+    return {RuffnecKk::TrackedNativeTransform::State::Tracked,
+        RuffnecKk::TrackedNativeTransform::Kind::InlineHook, 1,
+        "celestialrayone.max-life-one", true, true};
+}
 void PopulateProvider(Images& images) {
     auto& main = images.main; auto& core = images.core;
     main.bytes[0x10] = std::byte{0xFF}; main.bytes[0x11] = std::byte{0x25}; main.bytes[0x12] = std::byte{0x6A};
     for (std::size_t offset = 0x16; offset != 0x1A; ++offset) main.bytes[offset] = std::byte{0x90};
     main.bytes[0x1A] = std::byte{0xCC}; main.bytes[0xC0] = std::byte{0xD0}; main.bytes[0xC1] = std::byte{0x0D};
     Put64(main, 0x80, core.base + 0x100); core.bytes[0x100] = std::byte{0xE8}; core.bytes[0x101] = std::byte{0x0B};
+    for (std::size_t offset = 0x105; offset != 0x10A; ++offset) core.bytes[offset] = std::byte{0x90};
     main.bytes[0x70] = std::byte{0xFF}; main.bytes[0x71] = std::byte{0x25}; main.bytes[0x72] = std::byte{0x12};
     for (std::size_t offset = 0x76; offset != 0x7A; ++offset) main.bytes[offset] = std::byte{0x90};
     main.bytes[0x7A] = std::byte{0xCC}; Put64(main, 0x88, core.base + 0x100);
@@ -171,6 +202,87 @@ int main() {
     Adapter alignmentAccepted;
     if (!alignmentAccepted.Bind({&provider, Read, ValidateUnwind}, providerMain, core, ProviderContract, ToMask(Helper::GetUnitAlignment))
         || !alignmentAccepted.IsBound() || alignmentAccepted.IsBound(Helper::GetUnitStat)) return 14;
+    auto trackedHelpers = ProviderHelpers;
+    trackedHelpers[0].functions = TrackedFunctions;
+    const AdmissionContract trackedContract{"synthetic-tracked-provider", trackedHelpers};
+    Images celestial = provider;
+    celestial.core.bytes[0x100] = std::byte{0xE9};
+    celestial.core.bytes[0x101] = std::byte{0};
+    celestial.core.bytes[0x102] = std::byte{0};
+    celestial.core.bytes[0x103] = std::byte{0};
+    celestial.core.bytes[0x104] = std::byte{0};
+    ObservationCapture observation{CompatibleObservation()};
+    Adapter celestialAccepted;
+    if (!celestialAccepted.Bind({&celestial, Read, ValidateUnwind, ValidateExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&observation, ObserveTransform})
+        || observation.observedMain != providerMain.base
+        || observation.observedTarget != core.base + 0x100
+        || observation.observedExpectedSize != 5) return 18;
+    ObservationCapture displacedPrefixObservation{CompatibleObservation()};
+    Adapter displacedPrefixAccepted;
+    if (!displacedPrefixAccepted.Bind(
+            {&celestial, Read, ValidateUnwind, ValidateExecutable},
+            providerMain,
+            core,
+            ProviderContract,
+            ToMask(Helper::GetUnitStat),
+            {&displacedPrefixObservation, ObserveTransform})) return 29;
+    Images changedTrackedTail = celestial;
+    changedTrackedTail.core.bytes[0x105] ^= std::byte{1};
+    ObservationCapture changedTrackedTailObservation{CompatibleObservation()};
+    Adapter changedTrackedTailRejected;
+    if (changedTrackedTailRejected.Bind(
+            {&changedTrackedTail, Read, ValidateUnwind, ValidateExecutable},
+            providerMain,
+            core,
+            ProviderContract,
+            ToMask(Helper::GetUnitStat),
+            {&changedTrackedTailObservation, ObserveTransform})) return 30;
+    ObservationCapture noExecutableValidatorObservation{CompatibleObservation()};
+    Adapter noExecutableValidator;
+    if (noExecutableValidator.Bind({&celestial, Read, ValidateUnwind}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&noExecutableValidatorObservation, ObserveTransform})) return 28;
+    Adapter noDiagnostics;
+    if (noDiagnostics.Bind({&celestial, Read, ValidateUnwind}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat))) return 19;
+    auto rejectObservation = [&](RuffnecKk::TrackedNativeTransform::Observation candidate) {
+        ObservationCapture rejectedCapture{candidate};
+        Adapter rejected;
+        return rejected.Bind({&celestial, Read, ValidateUnwind, ValidateExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&rejectedCapture, ObserveTransform});
+    };
+    auto untracked = CompatibleObservation();
+    untracked.state = RuffnecKk::TrackedNativeTransform::State::Untracked;
+    if (rejectObservation(untracked)) return 20;
+    auto wrongOwner = CompatibleObservation();
+    wrongOwner.ownerPluginId = "not-celestial";
+    if (rejectObservation(wrongOwner)) return 21;
+    auto multipleOwners = CompatibleObservation();
+    multipleOwners.ownerCount = 2;
+    if (rejectObservation(multipleOwners)) return 22;
+    auto wrongKind = CompatibleObservation();
+    wrongKind.kind = RuffnecKk::TrackedNativeTransform::Kind::BytePatch;
+    if (rejectObservation(wrongKind)) return 23;
+    ObservationCapture nonExecutableObservation{CompatibleObservation()};
+    Adapter nonExecutableRejected;
+    if (nonExecutableRejected.Bind({&celestial, Read, ValidateUnwind, ValidateNotExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&nonExecutableObservation, ObserveTransform})) return 24;
+    Images brokenTail = celestial;
+    brokenTail.main.bytes[0x1A] ^= std::byte{1};
+    ObservationCapture brokenTailObservation{CompatibleObservation()};
+    Adapter brokenTailRejected;
+    if (brokenTailRejected.Bind({&brokenTail, Read, ValidateUnwind, ValidateExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&brokenTailObservation, ObserveTransform})) return 25;
+    Images brokenIndependentWitness = celestial;
+    brokenIndependentWitness.core.bytes[0x120] ^= std::byte{1};
+    ObservationCapture brokenWitnessObservation{CompatibleObservation()};
+    Adapter brokenWitnessRejected;
+    if (brokenWitnessRejected.Bind({&brokenIndependentWitness, Read, ValidateUnwind, ValidateExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&brokenWitnessObservation, ObserveTransform})) return 26;
+    ObservationCapture malformedObservation{CompatibleObservation(), false};
+    Adapter malformedRejected;
+    if (malformedRejected.Bind({&celestial, Read, ValidateUnwind, ValidateExecutable}, providerMain, core, trackedContract,
+            ToMask(Helper::GetUnitStat), {&malformedObservation, ObserveTransform})) return 27;
     constexpr std::array<std::size_t, 4> alignmentOffsets{{0x70, 0x7A, 0x88, 0x220}};
     for (const auto offset : alignmentOffsets) { Images corrupted = provider; auto& image = offset < 0x100 ? corrupted.main : corrupted.core; image.bytes[offset] ^= std::byte{1}; Adapter rejected; if (rejected.Bind({&corrupted, Read, ValidateUnwind}, providerMain, core, ProviderContract, ToMask(Helper::GetUnitAlignment))) return 15; }
     constexpr std::array<std::size_t, 12> offsets{{0x10, 0x80, 0x16, 0x1A, 0x100, 0x120, 0x130, 0x140, 0x150, 0x160, 0x180, 0x200}};

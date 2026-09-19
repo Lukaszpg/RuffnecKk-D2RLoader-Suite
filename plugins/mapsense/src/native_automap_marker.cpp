@@ -1,4 +1,5 @@
 #include "native_automap_marker.hpp"
+#include "tracked_native_transform_compat.hpp"
 
 #include "navigation_engine.hpp"
 #include "native_automap_missile.hpp"
@@ -6,6 +7,7 @@
 
 #include <D2RLPlugin/api.h>
 #include <RuffnecKk/native_stat_compat.hpp>
+#include <RuffnecKk/tracked_native_transform_d2rl.hpp>
 
 #include <Windows.h>
 
@@ -1599,9 +1601,8 @@ auto ValidateRuntime(const D2RL::PluginContext* context) noexcept -> bool {
         && check(
             ClientUnitHashTableWitnessRva,
             clientUnitHashTableExpected)
-        && check(
-            ClientUnitHashLookupWitnessRva,
-            clientUnitHashLookupExpected)
+        && Detail::ValidateClientUnitHashLookup(
+            context, clientUnitHashLookupExpected, true)
         && check(RenderAutomapUnitRva, renderUnitExpected);
 }
 
@@ -1629,7 +1630,8 @@ auto InitializeNativeAutomapMarker(
             RuffnecKk::NativeStatCompat::Helper::GetUnitAlignment);
     if (!candidateUnitStatAdapter.BindCurrentProcess(
             context->exeBase,
-            requiredStatHelpers)) {
+            requiredStatHelpers,
+            RuffnecKk::TrackedNativeTransform::D2RLDiagnosticsContext(context))) {
         context->LogWarn(
             "MapSense: native stat compatibility admission failed; marker hook refused.");
         return false;

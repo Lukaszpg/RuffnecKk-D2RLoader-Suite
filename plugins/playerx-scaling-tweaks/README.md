@@ -7,10 +7,10 @@ party members for NoDrop. Its optional Battle.net simulation disables
 artificial player-count controls and uses connected players as the only
 dynamic source.
 
-Current status: **1.0.0 Suite 1.4 candidate. Runtime qualification and release
+Current status: **1.0.1 Suite 1.4 candidate. Runtime qualification and release
 packaging are still required before publication.**
 
-Version 1.0.0 adds `[battle-net-simulation]` and declares the API v3 shared
+Version 1.0.1 adds `[battle-net-simulation]` and declares the API v3 shared
 execution role required by its combined local-control and gameplay behavior.
 
 ## Default player experience

@@ -6,6 +6,8 @@
 #include <span>
 #include <string_view>
 
+#include <RuffnecKk/tracked_native_transform.hpp>
+
 namespace RuffnecKk::NativeStatCompat {
 
 struct AddressRange final {
@@ -19,11 +21,21 @@ using ReadMemoryFn = bool(*)(void* userData, std::uintptr_t address, std::byte* 
 using ValidateUnwindFn = bool(*)(void* userData, std::uintptr_t imageBase,
     std::uint32_t functionRva, std::size_t functionSize, std::uint32_t unwindRva,
     bool hasUnwind) noexcept;
+using ValidateExecutableFn = bool(*)(void* userData, std::uintptr_t address) noexcept;
 
 struct MemoryReader final {
     void* userData{};
     ReadMemoryFn read{};
     ValidateUnwindFn validateUnwind{};
+    ValidateExecutableFn validateExecutable{};
+};
+
+using ObserveTrackedTransformFn = bool(*)(void* userData, std::uintptr_t mainImageBase,
+    std::uintptr_t targetAddress, std::span<const std::byte> expected,
+    TrackedNativeTransform::Observation& observation) noexcept;
+struct TransformDiagnostics final {
+    void* userData{};
+    ObserveTrackedTransformFn observe{};
 };
 
 struct DirectCallWitness final { std::uint32_t siteRva; std::uint32_t targetRva; };
@@ -37,6 +49,10 @@ struct FunctionWitness final {
     std::span<const DirectCallWitness> directCalls;
     std::span<const IndirectCallWitness> indirectCalls;
     std::span<const ReadOnlyWitness> readOnlyData;
+    // Bytes displaced by the one explicitly admitted tracked inline-hook
+    // owner. The untouched function tail and every independent witness remain
+    // mandatory; this prefix is never ignored for pristine functions.
+    std::uint32_t trackedPrefixBytes{};
 };
 struct ImportWitness final {
     std::uint32_t slotRva;
@@ -89,9 +105,13 @@ class Adapter final {
 public:
     [[nodiscard]] auto Bind(const MemoryReader& reader, AddressRange mainImage,
         AddressRange coreImage, const AdmissionContract& contract,
-        HelperMask required = ToMask(Helper::All)) noexcept -> bool;
+        HelperMask required = ToMask(Helper::All),
+        TransformDiagnostics diagnostics = {}) noexcept -> bool;
     [[nodiscard]] auto BindCurrentProcess(std::uintptr_t mainImageBase,
         HelperMask required, const AdmissionContract& contract = Loader130StatAdmissionContract()) noexcept -> bool;
+    [[nodiscard]] auto BindCurrentProcess(std::uintptr_t mainImageBase,
+        HelperMask required, TransformDiagnostics diagnostics,
+        const AdmissionContract& contract = Loader130StatAdmissionContract()) noexcept -> bool;
     void Reset() noexcept;
 
     [[nodiscard]] auto LastFailure() const noexcept -> Failure { return failure_; }

@@ -59,6 +59,136 @@ enum class CombatTriggerKind : std::uint8_t {
     OpenWounds,
 };
 
+// Native entries that another plugin legitimately owns cannot be hooked a
+// second time.  CompatibleForeignOwner is reserved for the exact, separately
+// verified CelestialRay owner assigned to that entry; every other changed or
+// ambiguous entry is Rejected before Cast Triggers installs its first hook.
+enum class NativeSiteDisposition : std::uint8_t {
+    Pristine,
+    CompatibleForeignOwner,
+    Rejected,
+};
+
+// Native activation is deliberately deferred until D2RLoader has finished
+// loading every data table and plugin contribution.  In particular, this
+// preserves the pristine EventFunc20 entry while Crossbow Charges performs
+// its strict callable admission.  The state is one-shot: a refusal never
+// retries on a later table revision.
+enum class DeferredNativeActivationState : std::uint8_t {
+    Pending,
+    Installing,
+    Active,
+    Refused,
+    Stopping,
+};
+
+enum class DeferredNativeActivationTransition : std::uint8_t {
+    BeginInstalling,
+    PublishActive,
+    Refuse,
+    BeginStopping,
+};
+
+// This pure transition table is shared by the atomic runtime publication path
+// and the policy tests.  A terminal refusal cannot be retried, and stopping
+// always wins over a later activation publication.
+constexpr auto TransitionDeferredNativeActivation(
+        DeferredNativeActivationState state,
+        DeferredNativeActivationTransition transition) noexcept
+        -> DeferredNativeActivationState {
+    switch (transition) {
+    case DeferredNativeActivationTransition::BeginInstalling:
+        return state == DeferredNativeActivationState::Pending
+            ? DeferredNativeActivationState::Installing
+            : state;
+    case DeferredNativeActivationTransition::PublishActive:
+        return state == DeferredNativeActivationState::Installing
+            ? DeferredNativeActivationState::Active
+            : state;
+    case DeferredNativeActivationTransition::Refuse:
+        return state == DeferredNativeActivationState::Installing
+            ? DeferredNativeActivationState::Refused
+            : state;
+    case DeferredNativeActivationTransition::BeginStopping:
+        return state == DeferredNativeActivationState::Stopping
+            ? state
+            : DeferredNativeActivationState::Stopping;
+    }
+    return state;
+}
+
+constexpr auto CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState state) noexcept -> bool {
+    return state == DeferredNativeActivationState::Pending;
+}
+
+constexpr auto IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState state) noexcept -> bool {
+    return state == DeferredNativeActivationState::Active
+        || state == DeferredNativeActivationState::Refused
+        || state == DeferredNativeActivationState::Stopping;
+}
+
+constexpr auto IsDeferredNativeBehaviorActive(
+        DeferredNativeActivationState state,
+        bool operational) noexcept -> bool {
+    return state == DeferredNativeActivationState::Active && operational;
+}
+
+constexpr auto DeferredNativeActivationStateName(
+        DeferredNativeActivationState state) noexcept -> std::string_view {
+    switch (state) {
+    case DeferredNativeActivationState::Pending:
+        return "pending DataTablesLoaded";
+    case DeferredNativeActivationState::Installing:
+        return "installing";
+    case DeferredNativeActivationState::Active:
+        return "active";
+    case DeferredNativeActivationState::Refused:
+        return "refused";
+    case DeferredNativeActivationState::Stopping:
+        return "stopping";
+    }
+    return "unknown";
+}
+
+struct NativeCapabilities final {
+    bool loadable{};
+    bool sourceSkillTriggers{};
+    bool criticalStrikeTrigger{};
+    bool positionInput{};
+    bool itemSkillExecution{};
+};
+
+constexpr auto ResolveNativeCapabilities(
+        NativeSiteDisposition skillHandler,
+        NativeSiteDisposition damageBuilder,
+        NativeSiteDisposition positionInput,
+        NativeSiteDisposition targetItemSkill,
+        NativeSiteDisposition positionItemSkill) noexcept
+        -> NativeCapabilities {
+    const bool rejected = skillHandler == NativeSiteDisposition::Rejected
+        || damageBuilder == NativeSiteDisposition::Rejected
+        || positionInput == NativeSiteDisposition::Rejected
+        || targetItemSkill == NativeSiteDisposition::Rejected
+        || positionItemSkill == NativeSiteDisposition::Rejected;
+    const bool itemSkillExecution =
+        targetItemSkill == NativeSiteDisposition::Pristine
+        && positionItemSkill == NativeSiteDisposition::Pristine;
+    return {
+        .loadable = !rejected,
+        .sourceSkillTriggers =
+            itemSkillExecution
+            && skillHandler == NativeSiteDisposition::Pristine
+            && positionInput == NativeSiteDisposition::Pristine,
+        .criticalStrikeTrigger =
+            itemSkillExecution
+            && damageBuilder == NativeSiteDisposition::Pristine,
+        .positionInput = positionInput == NativeSiteDisposition::Pristine,
+        .itemSkillExecution = itemSkillExecution,
+    };
+}
+
 struct SourceSkillFilter {
     std::vector<std::int32_t> includeSkillIds;
     std::vector<std::int32_t> excludeSkillIds;

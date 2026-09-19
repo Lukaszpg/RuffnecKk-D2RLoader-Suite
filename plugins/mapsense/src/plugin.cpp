@@ -3099,7 +3099,7 @@ void WriteStatus(const D2RL::PluginContext* context) noexcept {
     std::snprintf(
         message,
         sizeof(message),
-            "RuffnecKk MapSense 2.0.0: active=%s; reveal-map-provider=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
+            "RuffnecKk MapSense 2.0.1: active=%s; reveal-map-provider=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
         IsRevealEngineActive() ? "true" : "false",
         IsExternalLabelProviderActive() ? "ready" : "unavailable",
         GameplayReady.load(std::memory_order_acquire) ? "ready" : "inactive",
@@ -5014,11 +5014,15 @@ void DrawAutomapPoiSnapshots(
                     std::max(1.0F, io.DisplaySize.x),
                     0.0F,
                     level->name.utf8.c_str());
+                const auto exitExtent = labelMetrics.IconTopExtentForViewport(
+                    NativeExitIconTopExtent, poi.nativeViewportScale);
+                const auto exitGap = labelMetrics.SpacingForViewport(
+                    NativeAutomapLabelGap, poi.nativeViewportScale);
                 const auto textTop = AutomapLabelTopAboveIcon(
                     center.y,
                     textBounds.y,
-                    labelMetrics.IconTopExtent(NativeExitIconTopExtent),
-                    labelMetrics.Spacing(NativeAutomapLabelGap));
+                    exitExtent,
+                    exitGap);
                 const auto textPosition = ImVec2{
                     std::clamp(
                         center.x - textBounds.x * 0.5F,
@@ -5053,32 +5057,16 @@ void DrawAutomapPoiSnapshots(
                 if (duplicate) break;
                 auto placedRectangle = anchorRectangle;
                 bool placed{};
-                const auto separation = textBounds.y
-                    + labelMetrics.Spacing(5.0F);
-                constexpr std::size_t MaximumSeparationSlots = 16U;
-                for (std::size_t slot = 0U;
-                        slot < MaximumSeparationSlots;
-                        ++slot) {
-                    // Prefer stacking above the icon. Downward slots are a
-                    // bounded fallback for labels already clipped at the top
-                    // edge of the display.
-                    const auto offset = slot == 0U
-                        ? 0.0F
-                        : slot <= MaximumSeparationSlots / 2U
-                            ? -static_cast<float>(slot) * separation
-                            : static_cast<float>(
-                                slot - MaximumSeparationSlots / 2U)
-                                * separation;
-                    const auto candidateTop = std::clamp(
-                        anchorRectangle.top + offset,
-                        0.0F,
-                        std::max(0.0F, io.DisplaySize.y - textBounds.y));
-                    const AutomapLabelRectangle candidate{
-                        .left = anchorRectangle.left,
-                        .top = candidateTop,
-                        .right = anchorRectangle.right,
-                        .bottom = candidateTop + textBounds.y,
-                    };
+                for (const auto& candidate : NearAutomapLabelCandidates(
+                        anchorRectangle, io.DisplaySize.y,
+                        labelMetrics.Spacing(5.0F))) {
+                    // The native sprite extends upward from its projected origin.
+                    // Keep fallback rows clear of that marker as well.
+                    if (!AutomapLabelClearsIcon(candidate, center.y,
+                            exitExtent,
+                            exitGap)) {
+                        continue;
+                    }
                     bool collision{};
                     for (std::size_t drawnIndex = 0U;
                             drawnIndex < drawnExitLabelCount;
@@ -5107,7 +5095,7 @@ void DrawAutomapPoiSnapshots(
                 }
                 const ImVec2 placedCenter{
                     center.x,
-                    center.y + placedRectangle.top - anchorRectangle.top,
+                    placedRectangle.top,
                 };
                 (void)DrawCenteredShadowedText(
                     drawList,
@@ -5117,14 +5105,13 @@ void DrawAutomapPoiSnapshots(
                     fontSize,
                     ToImGuiColor(Settings.objects.exitLabels.color, opacity),
                     opacity,
-                    AutomapTextPlacement::AboveIcon,
-                    labelMetrics.IconTopExtent(NativeExitIconTopExtent),
-                    labelMetrics.Spacing(NativeAutomapLabelGap));
+                    AutomapTextPlacement::Top);
                 break;
             }
             case AutomapPoiKind::WaypointLabel: {
                 if (!Settings.objects.waypointLabels.enabled
-                        || poi.sourceId <= 0) {
+                        || poi.sourceId <= 0
+                        || !Detail::AllowsWaypointLabelForLevel(poi.sourceId)) {
                     break;
                 }
                 const auto* const level = dataCatalog->FindLevel(poi.sourceId);
@@ -5142,11 +5129,15 @@ void DrawAutomapPoiSnapshots(
                     std::max(1.0F, io.DisplaySize.x),
                     0.0F,
                     level->waypointLabelUtf8.c_str());
+                const auto waypointExtent = labelMetrics.IconTopExtentForViewport(
+                    NativeWaypointLabelTopExtent, poi.nativeViewportScale);
+                const auto waypointGap = labelMetrics.SpacingForViewport(
+                    NativeWaypointLabelGap, poi.nativeViewportScale);
                 const auto textTop = AutomapLabelTopAboveIcon(
                     center.y,
                     textBounds.y,
-                    labelMetrics.IconTopExtent(NativeWaypointIconTopExtent),
-                    labelMetrics.Spacing(NativeWaypointLabelGap));
+                    waypointExtent,
+                    waypointGap);
                 const auto textPosition = ImVec2{
                     std::clamp(
                         center.x - textBounds.x * 0.5F,
@@ -5165,29 +5156,16 @@ void DrawAutomapPoiSnapshots(
                 };
                 auto placedRectangle = anchorRectangle;
                 bool placed{};
-                const auto separation = textBounds.y
-                    + labelMetrics.Spacing(5.0F);
-                constexpr std::size_t MaximumSeparationSlots = 16U;
-                for (std::size_t slot = 0U;
-                        slot < MaximumSeparationSlots;
-                        ++slot) {
-                    const auto offset = slot == 0U
-                        ? 0.0F
-                        : slot <= MaximumSeparationSlots / 2U
-                            ? -static_cast<float>(slot) * separation
-                            : static_cast<float>(
-                                slot - MaximumSeparationSlots / 2U)
-                                * separation;
-                    const auto candidateTop = std::clamp(
-                        anchorRectangle.top + offset,
-                        0.0F,
-                        std::max(0.0F, io.DisplaySize.y - textBounds.y));
-                    const AutomapLabelRectangle candidate{
-                        .left = anchorRectangle.left,
-                        .top = candidateTop,
-                        .right = anchorRectangle.right,
-                        .bottom = candidateTop + textBounds.y,
-                    };
+                for (const auto& candidate : NearAutomapLabelCandidates(
+                        anchorRectangle, io.DisplaySize.y,
+                        labelMetrics.Spacing(5.0F))) {
+                    // The native sprite extends upward from its projected origin.
+                    // Keep fallback rows clear of that marker as well.
+                    if (!AutomapLabelClearsIcon(candidate, center.y,
+                            waypointExtent,
+                            waypointGap)) {
+                        continue;
+                    }
                     bool collision{};
                     for (std::size_t drawnIndex = 0U;
                             drawnIndex < drawnExitLabelCount;
@@ -5215,7 +5193,7 @@ void DrawAutomapPoiSnapshots(
                 }
                 const ImVec2 placedCenter{
                     center.x,
-                    center.y + placedRectangle.top - anchorRectangle.top,
+                    placedRectangle.top,
                 };
                 (void)DrawCenteredShadowedText(
                     drawList,
@@ -5227,9 +5205,7 @@ void DrawAutomapPoiSnapshots(
                         Settings.objects.waypointLabels.color,
                         opacity),
                     opacity,
-                    AutomapTextPlacement::AboveIcon,
-                    labelMetrics.IconTopExtent(NativeWaypointIconTopExtent),
-                    labelMetrics.Spacing(NativeWaypointLabelGap));
+                    AutomapTextPlacement::Top);
                 break;
             }
             case AutomapPoiKind::LevelLabel: {
@@ -5294,29 +5270,9 @@ void DrawAutomapPoiSnapshots(
                 if (duplicate) break;
                 auto placedRectangle = anchorRectangle;
                 bool placed{};
-                const auto separation = textBounds.y
-                    + labelMetrics.Spacing(5.0F);
-                constexpr std::size_t MaximumSeparationSlots = 16U;
-                for (std::size_t slot = 0U;
-                        slot < MaximumSeparationSlots;
-                        ++slot) {
-                    const auto offset = slot == 0U
-                        ? 0.0F
-                        : slot <= MaximumSeparationSlots / 2U
-                            ? -static_cast<float>(slot) * separation
-                            : static_cast<float>(
-                                slot - MaximumSeparationSlots / 2U)
-                                * separation;
-                    const auto candidateTop = std::clamp(
-                        anchorRectangle.top + offset,
-                        0.0F,
-                        std::max(0.0F, io.DisplaySize.y - textBounds.y));
-                    const AutomapLabelRectangle candidate{
-                        .left = anchorRectangle.left,
-                        .top = candidateTop,
-                        .right = anchorRectangle.right,
-                        .bottom = candidateTop + textBounds.y,
-                    };
+                for (const auto& candidate : NearAutomapLabelCandidates(
+                        anchorRectangle, io.DisplaySize.y,
+                        labelMetrics.Spacing(5.0F))) {
                     bool collision{};
                     for (std::size_t drawnIndex = 0U;
                             drawnIndex < drawnExitLabelCount;
@@ -5344,7 +5300,7 @@ void DrawAutomapPoiSnapshots(
                 }
                 const ImVec2 placedCenter{
                     center.x,
-                    center.y + placedRectangle.top - anchorRectangle.top,
+                    placedRectangle.top,
                 };
                 (void)DrawCenteredShadowedText(
                     drawList,
@@ -5354,7 +5310,7 @@ void DrawAutomapPoiSnapshots(
                     fontSize,
                     ToImGuiColor(configuredColor, opacity),
                     opacity,
-                    AutomapTextPlacement::Centered);
+                    AutomapTextPlacement::Top);
                 break;
             }
             case AutomapPoiKind::ShrineIcon: {
@@ -6295,7 +6251,7 @@ constexpr D2RL::PluginInfo PluginInfo{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-mapsense",
     .name = "RuffnecKk MapSense",
-    .version = "2.0.0",
+    .version = "2.0.1",
     .author = "RuffnecKk",
     .description = "Reveals maps, marks monsters, and draws navigation guidance.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
@@ -6608,7 +6564,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         loadedMessage,
         sizeof(loadedMessage),
-        "RuffnecKk MapSense 2.0.0 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal-Map=%s; settings=active; native-panel-occlusion=%s.",
+        "RuffnecKk MapSense 2.0.1 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal-Map=%s; settings=active; native-panel-occlusion=%s.",
         poiRuntimeAvailable ? "pending-localization" : "unavailable",
         externalLabelsAvailable ? "active" : "unavailable",
         markerAvailable ? "active" : "unavailable",

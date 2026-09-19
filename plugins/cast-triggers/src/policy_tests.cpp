@@ -3,6 +3,7 @@
 #endif
 #include "cast_triggers_policy.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,147 @@
 using namespace ruffneckk::cast_triggers;
 
 int main() {
+    static_assert(CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState::Pending));
+    static_assert(!CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState::Installing));
+    static_assert(!CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState::Active));
+    static_assert(!CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState::Refused));
+    static_assert(!CanBeginDeferredNativeActivation(
+        DeferredNativeActivationState::Stopping));
+    static_assert(!IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState::Pending));
+    static_assert(!IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState::Installing));
+    static_assert(IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState::Active));
+    static_assert(IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState::Refused));
+    static_assert(IsDeferredNativeActivationTerminal(
+        DeferredNativeActivationState::Stopping));
+    static_assert(DeferredNativeActivationStateName(
+        DeferredNativeActivationState::Pending)
+        == "pending DataTablesLoaded");
+    static_assert(DeferredNativeActivationStateName(
+        DeferredNativeActivationState::Refused) == "refused");
+
+    auto activationState = DeferredNativeActivationState::Pending;
+    activationState = TransitionDeferredNativeActivation(
+        activationState,
+        DeferredNativeActivationTransition::BeginInstalling);
+    assert(activationState == DeferredNativeActivationState::Installing);
+    assert(!IsDeferredNativeBehaviorActive(activationState, true));
+    activationState = TransitionDeferredNativeActivation(
+        activationState,
+        DeferredNativeActivationTransition::BeginStopping);
+    assert(activationState == DeferredNativeActivationState::Stopping);
+    assert(TransitionDeferredNativeActivation(
+        activationState,
+        DeferredNativeActivationTransition::PublishActive)
+        == DeferredNativeActivationState::Stopping);
+    assert(!IsDeferredNativeBehaviorActive(activationState, true));
+
+    activationState = DeferredNativeActivationState::Pending;
+    activationState = TransitionDeferredNativeActivation(
+        activationState,
+        DeferredNativeActivationTransition::BeginInstalling);
+    activationState = TransitionDeferredNativeActivation(
+        activationState,
+        DeferredNativeActivationTransition::PublishActive);
+    assert(activationState == DeferredNativeActivationState::Active);
+    assert(!IsDeferredNativeBehaviorActive(activationState, false));
+    assert(IsDeferredNativeBehaviorActive(activationState, true));
+
+    constexpr auto pristineCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine);
+    static_assert(pristineCapabilities.loadable);
+    static_assert(pristineCapabilities.sourceSkillTriggers);
+    static_assert(pristineCapabilities.criticalStrikeTrigger);
+    static_assert(pristineCapabilities.positionInput);
+    static_assert(pristineCapabilities.itemSkillExecution);
+
+    constexpr auto celestialComposableCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::CompatibleForeignOwner,
+        NativeSiteDisposition::CompatibleForeignOwner,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine);
+    static_assert(celestialComposableCapabilities.loadable);
+    static_assert(!celestialComposableCapabilities.sourceSkillTriggers);
+    static_assert(!celestialComposableCapabilities.criticalStrikeTrigger);
+    static_assert(celestialComposableCapabilities.positionInput);
+    static_assert(celestialComposableCapabilities.itemSkillExecution);
+
+    constexpr auto celestialWhirlwindCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::CompatibleForeignOwner,
+        NativeSiteDisposition::CompatibleForeignOwner,
+        NativeSiteDisposition::CompatibleForeignOwner);
+    static_assert(celestialWhirlwindCapabilities.loadable);
+    static_assert(!celestialWhirlwindCapabilities.sourceSkillTriggers);
+    static_assert(!celestialWhirlwindCapabilities.criticalStrikeTrigger);
+    static_assert(!celestialWhirlwindCapabilities.positionInput);
+    static_assert(!celestialWhirlwindCapabilities.itemSkillExecution);
+
+    constexpr auto celestialTargetCasterCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::CompatibleForeignOwner,
+        NativeSiteDisposition::Pristine);
+    static_assert(celestialTargetCasterCapabilities.loadable);
+    static_assert(!celestialTargetCasterCapabilities.sourceSkillTriggers);
+    static_assert(!celestialTargetCasterCapabilities.criticalStrikeTrigger);
+    static_assert(celestialTargetCasterCapabilities.positionInput);
+    static_assert(!celestialTargetCasterCapabilities.itemSkillExecution);
+
+    constexpr auto rejectedOwnershipCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Rejected,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine);
+    static_assert(!rejectedOwnershipCapabilities.loadable);
+
+    constexpr auto rejectedDamageBuilderCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Rejected,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine);
+    static_assert(!rejectedDamageBuilderCapabilities.loadable);
+
+    constexpr auto rejectedPositionInputCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Rejected,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine);
+    static_assert(!rejectedPositionInputCapabilities.loadable);
+
+    constexpr auto rejectedTargetItemSkillCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Rejected,
+        NativeSiteDisposition::Pristine);
+    static_assert(!rejectedTargetItemSkillCapabilities.loadable);
+
+    constexpr auto rejectedPositionItemSkillCapabilities = ResolveNativeCapabilities(
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Pristine,
+        NativeSiteDisposition::Rejected);
+    static_assert(!rejectedPositionItemSkillCapabilities.loadable);
+
     static_assert(IsCastAnimation(PlayerModeCast, PlayerModeCast));
     static_assert(IsCastAnimation(PlayerModeSequence, PlayerModeCast));
     static_assert(!IsCastAnimation(PlayerModeSequence, PlayerModeSequence));
@@ -535,9 +677,10 @@ enabled = true
 
     std::ifstream pluginSource(CAST_TRIGGERS_PLUGIN_FILE, std::ios::binary);
     assert(pluginSource.is_open());
-    const std::string source{
+    std::string source{
         std::istreambuf_iterator<char>(pluginSource),
         std::istreambuf_iterator<char>()};
+    source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
     assert(source.find("ModScopedOnly") == std::string::npos);
     assert(source.find("D2RL::PluginFlags::Server") != std::string::npos);
     assert(source.find("ClassifySourceSkillRecord") != std::string::npos);
@@ -546,6 +689,127 @@ enabled = true
     assert(source.find("only governed D2R build aliases")
         == std::string::npos);
     assert(source.find("ValidateNativeFingerprint") != std::string::npos);
+    assert(source.find("RegisterDeferredNativeActivation") != std::string::npos);
+    assert(source.find("UnregisterDeferredNativeActivation") != std::string::npos);
+    assert(source.find("void __cdecl OnDataTablesLoaded(") != std::string::npos);
+    assert(source.find("DeferredNativeActivationState::Pending")
+        != std::string::npos);
+    assert(source.find("DeferredNativeActivationTransition::BeginInstalling")
+        != std::string::npos);
+    assert(source.find("DeferredNativeActivationTransition::PublishActive")
+        != std::string::npos);
+    assert(source.find("DeferredNativeActivationTransition::Refuse")
+        != std::string::npos);
+    assert(source.find("DeferredNativeActivationTransition::BeginStopping")
+        != std::string::npos);
+    assert(source.find("DataTablesLoaded listener registration failed; plugin refused before native writes.")
+        != std::string::npos);
+    assert(source.find("no fingerprint or hook ran during plugin load.")
+        != std::string::npos);
+    assert(source.find("EventFuncSlot20Rva") == std::string::npos);
+    assert(source.find("bool IsNativeBehaviorActive() noexcept")
+        != std::string::npos);
+    assert(source.find("const bool observe = IsNativeBehaviorActive()")
+        != std::string::npos);
+    assert(source.find("if (IsNativeBehaviorActive()\n"
+        "            && !ShouldExposeSyntheticStat(") != std::string::npos);
+    assert(source.find("if (!IsNativeBehaviorActive()) {\n"
+        "        return OriginalSkillHandler(") != std::string::npos);
+    std::size_t operationalLoadCount{};
+    for (std::size_t offset = source.find("Operational.load(");
+            offset != std::string::npos;
+            offset = source.find("Operational.load(", offset + 1)) {
+        ++operationalLoadCount;
+    }
+    assert(operationalLoadCount == 1);
+    [[maybe_unused]] const auto deferredCallback = source.find(
+        "void __cdecl OnDataTablesLoaded(");
+    [[maybe_unused]] const auto deferredActivation = source.find(
+        "if (!ValidateNativeFingerprint())", deferredCallback);
+    [[maybe_unused]] const auto deferredHookInstall = source.find(
+        "if (!InstallHooks())", deferredActivation);
+    [[maybe_unused]] const auto deferredPublication = source.find(
+        "if (!PublishNativeActivation())", deferredHookInstall);
+    [[maybe_unused]] const auto productionGate = source.find(
+        "bool IsNativeBehaviorActive() noexcept");
+    [[maybe_unused]] const auto productionPublication = source.find(
+        "bool PublishNativeActivation() noexcept");
+    [[maybe_unused]] const auto activeTransition = source.find(
+        "DeferredNativeActivationTransition::PublishActive",
+        productionPublication);
+    [[maybe_unused]] const auto operationalPublication = source.find(
+        "Operational.store(true", activeTransition);
+    [[maybe_unused]] const auto loaderLoad = source.find(
+        "D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(");
+    [[maybe_unused]] const auto loaderUnload = source.find(
+        "D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept");
+    assert(deferredCallback != std::string::npos);
+    assert(deferredActivation != std::string::npos);
+    assert(deferredHookInstall != std::string::npos);
+    assert(deferredPublication != std::string::npos);
+    assert(productionGate != std::string::npos);
+    assert(productionPublication != std::string::npos);
+    assert(activeTransition != std::string::npos);
+    assert(operationalPublication != std::string::npos);
+    assert(deferredCallback < deferredActivation);
+    assert(deferredActivation < deferredHookInstall);
+    assert(deferredHookInstall < deferredPublication);
+    assert(activeTransition < operationalPublication);
+    assert(loaderLoad != std::string::npos);
+    assert(loaderUnload != std::string::npos);
+    assert(source.substr(loaderLoad, loaderUnload - loaderLoad).find(
+        "ValidateNativeFingerprint()") == std::string::npos);
+    assert(source.substr(loaderLoad, loaderUnload - loaderLoad).find(
+        "InstallHooks()") == std::string::npos);
+    assert(source.substr(loaderLoad, loaderUnload - loaderLoad).find(
+        "UnregisterDeferredNativeActivation") == std::string::npos);
+    assert(source.substr(loaderUnload).find(
+        "UnregisterDeferredNativeActivation();") != std::string::npos);
+    [[maybe_unused]] const auto unloadStopping = source.find(
+        "DeferredNativeActivationTransition::BeginStopping", loaderUnload);
+    [[maybe_unused]] const auto unloadOperational = source.find(
+        "Operational.store(\n        false", unloadStopping);
+    assert(unloadStopping != std::string::npos);
+    assert(unloadOperational != std::string::npos);
+    assert(unloadStopping < unloadOperational);
+    assert(source.find("celestialrayone.skill-srcdam-calc")
+        != std::string::npos);
+    assert(source.find("celestialrayone.critical-strike-damage")
+        != std::string::npos);
+    assert(source.find("celestialrayone.whirlwind")
+        != std::string::npos);
+    assert(source.find("TrackedNativeTransform::ObserveD2RL")
+        != std::string::npos);
+    assert(source.find("Cast Triggers capabilities:")
+        != std::string::npos);
+    assert(source.find("Capabilities.sourceSkillTriggers")
+        != std::string::npos);
+    assert(source.find("Capabilities.criticalStrikeTrigger")
+        != std::string::npos);
+    assert(source.find(
+        "Capabilities.positionInput\n"
+        "            && !Context->InstallInlineHook(\n"
+        "            PlayerSkillPositionInputRva") != std::string::npos);
+    assert(source.find(
+        "Capabilities.itemSkillExecution\n"
+        "            && !Context->InstallInlineHook(\n"
+        "            CastItemSkillOnTargetRva") != std::string::npos);
+    assert(source.find(
+        "Capabilities.itemSkillExecution\n"
+        "            && !Context->InstallInlineHook(\n"
+        "            CastItemSkillAtPositionRva") != std::string::npos);
+    assert(source.find(
+        "if (!IsNativeBehaviorActive() || !Capabilities.itemSkillExecution || !game || !attacker")
+        != std::string::npos);
+    assert(source.find(
+        "if (!Capabilities.itemSkillExecution\n"
+        "            || !IsAcceptedPlayerSkillInput(inputResult)")
+        != std::string::npos);
+    assert(source.find("compatible item-skill execution is unavailable")
+        == std::string::npos);
+    assert(source.find(
+        "one or more native sites failed compatibility admission")
+        != std::string::npos);
     assert(source.find("SkillHandlerContextWitnessExpected")
         != std::string::npos);
     assert(source.find("GameFrameLayoutWitnessExpected")

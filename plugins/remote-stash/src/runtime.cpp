@@ -74,7 +74,7 @@ using ruffneckk::remote_stash::WidgetRect;
 
 constexpr std::size_t MaximumConfigBytes = 65'536;
 constexpr std::uint64_t MaximumCustomSpriteBytes = 64ULL * 1024ULL * 1024ULL;
-constexpr char PluginVersion[] = "2.3.1";
+constexpr char PluginVersion[] = "2.3.2";
 
 #define REMOTE_SITE(value) value
 
@@ -3830,7 +3830,7 @@ bool Load(
     if (!HotkeySettings.enabled) {
         RegisterStatusCommand();
         context->LogInfo(
-            "Remote Stash 2.3.1 by RuffnecKk disabled; no hook, input action, listener, resource, or child layout was registered.");
+            "Remote Stash 2.3.2 by RuffnecKk disabled; no hook, input action, listener, resource, or child layout was registered.");
         return true;
     }
     const auto* runtimeBuild = D2RL::GetBuildName(context);

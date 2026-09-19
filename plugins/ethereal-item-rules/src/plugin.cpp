@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -85,6 +86,12 @@ Config Settings{};
 CheckItemTypeFn OriginalCheckItemType{};
 GetItemContextFn GetItemContext{};
 GetDataTablesFn GetDataTables{};
+const D2RL::LifecycleServiceV1* Lifecycle{};
+D2RL::Lifecycle::ListenerHandle ExclusionListenerHandle{
+    D2RL::Lifecycle::InvalidHandle};
+std::atomic<ExclusionState> ExclusionsState{ExclusionState::Disabled};
+bool ExclusionListenerRegistered{};
+std::mutex ExclusionLifecycleMutex;
 std::atomic<std::uint64_t> ExcludedEligibleItems{};
 std::atomic<std::uint32_t> ResolvedTypeCount{};
 std::atomic<std::uint32_t> UnresolvedTypeCount{};
@@ -100,7 +107,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-ethereal-item-rules",
     .name = "Ethereal Item Rules",
-    .version = "1.0.2",
+    .version = "1.0.3",
     .author = "RuffnecKk",
     .description = "Controls ethereal item chance and eligibility.",
     .flags = D2RL::PluginFlags::Server | D2RL::PluginFlags::NativeHooks,
@@ -115,6 +122,10 @@ void ResetState() noexcept {
     OriginalCheckItemType = nullptr;
     GetItemContext = nullptr;
     GetDataTables = nullptr;
+    Lifecycle = nullptr;
+    ExclusionListenerHandle = D2RL::Lifecycle::InvalidHandle;
+    ExclusionListenerRegistered = false;
+    ExclusionsState.store(ExclusionState::Disabled, std::memory_order_relaxed);
     ExcludedEligibleItems.store(0, std::memory_order_relaxed);
     ResolvedTypeCount.store(0, std::memory_order_relaxed);
     UnresolvedTypeCount.store(0, std::memory_order_relaxed);
@@ -124,6 +135,27 @@ void ResetState() noexcept {
     PendingGateItem = nullptr;
     PendingGateExcluded = false;
     PendingGateWasWeapon = false;
+}
+
+auto TryTransitionExclusionState(
+    ExclusionState from,
+    ExclusionState to
+) noexcept -> bool {
+    if (!IsValidExclusionTransition(from, to)) return false;
+    auto expected = from;
+    return ExclusionsState.compare_exchange_strong(
+        expected,
+        to,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
+
+auto StopExclusions() noexcept -> void {
+    for (;;) {
+        const auto state = ExclusionsState.load(std::memory_order_acquire);
+        if (state == ExclusionState::Stopping) return;
+        if (TryTransitionExclusionState(state, ExclusionState::Stopping)) return;
+    }
 }
 
 auto ReadConfiguration() noexcept -> bool {
@@ -164,7 +196,7 @@ auto Check(
         return true;
     }
     const auto message = std::string("EtherealItemRules: ") + label
-        + " signature mismatch; no mutation was started.";
+        + " signature mismatch; expected bytes were not changed.";
     Context->LogError(message.c_str());
     return false;
 }
@@ -173,10 +205,6 @@ auto ValidateRuntime() noexcept -> bool {
     if (!Settings.enabled) return true;
     bool valid = true;
     if (HasExcludedItemTypes(Settings)) {
-        valid = Check(
-            CheckItemTypeRva,
-            ExpectedCheckItemType,
-            "item-type entry") && valid;
         valid = Check(
             GetItemContextRva,
             ExpectedGetItemContext,
@@ -296,6 +324,10 @@ std::int32_t __fastcall HookCheckItemType(
     std::int32_t itemType
 ) noexcept {
     const auto result = OriginalCheckItemType(item, itemType);
+    if (!IsExclusionHookActive(
+            ExclusionsState.load(std::memory_order_acquire))) {
+        return result;
+    }
     const auto returnRva = reinterpret_cast<std::uintptr_t>(_ReturnAddress())
         - Base;
 
@@ -332,8 +364,47 @@ std::int32_t __fastcall HookCheckItemType(
     return result;
 }
 
+auto ExclusionStateText(ExclusionState state) noexcept -> const char* {
+    switch (state) {
+    case ExclusionState::Disabled:   return "disabled";
+    case ExclusionState::Pending:    return "pending";
+    case ExclusionState::Installing: return "installing";
+    case ExclusionState::Active:     return "active";
+    case ExclusionState::Refused:    return "refused";
+    case ExclusionState::Stopping:   return "stopping";
+    }
+    return "unknown";
+}
+
+void UnregisterExclusionListener() noexcept {
+    if (!ExclusionListenerRegistered || !Lifecycle
+        || ExclusionListenerHandle == D2RL::Lifecycle::InvalidHandle) {
+        return;
+    }
+    const auto result = Lifecycle->unregisterDataTablesLoadedListener(
+        Context, ExclusionListenerHandle);
+    if (result == D2RL::Lifecycle::Result::Success
+        || result == D2RL::Lifecycle::Result::NotFound
+        || result == D2RL::Lifecycle::Result::StaleHandle) {
+        ExclusionListenerHandle = D2RL::Lifecycle::InvalidHandle;
+        ExclusionListenerRegistered = false;
+        return;
+    }
+    if (Context) {
+        Context->LogError(
+            "EtherealItemRules: DataTablesLoaded listener could not be unregistered.");
+    }
+}
+
+auto RefuseExclusions(const char* message) noexcept -> bool {
+    if (!TryTransitionExclusionState(
+            ExclusionState::Installing,
+            ExclusionState::Refused)) return false;
+    if (Context) Context->LogError(message);
+    return true;
+}
+
 auto InstallExclusionHook() noexcept -> bool {
-    if (!HasExcludedItemTypes(Settings)) return true;
     GetItemContext = At<GetItemContextFn>(GetItemContextRva);
     GetDataTables = At<GetDataTablesFn>(GetDataTablesRva);
     if (!Context->InstallInlineHook(
@@ -346,6 +417,101 @@ auto InstallExclusionHook() noexcept -> bool {
             "EtherealItemRules: item-type hook installation failed.");
         return false;
     }
+    return true;
+}
+
+void __cdecl OnDataTablesLoaded(
+    const D2RL::PluginContext* context,
+    const D2RL::Lifecycle::DataTablesLoadedEvent* event,
+    void*
+) noexcept {
+    const std::lock_guard lock(ExclusionLifecycleMutex);
+    if (!TryTransitionExclusionState(
+            ExclusionState::Pending,
+            ExclusionState::Installing)) {
+        return;
+    }
+    if (context != Context
+        || !event
+        || !D2RL::Lifecycle::HasDataTablesLoadedEventField(
+            event, D2RL::Lifecycle::DataTablesLoadedEventRequiredSize)
+        || event->revision == 0) {
+        RefuseExclusions(
+            "EtherealItemRules: first DataTablesLoaded event was invalid; exclusions refused.");
+        return;
+    }
+    if (!Check(
+            CheckItemTypeRva,
+            ExpectedCheckItemType,
+            "item-type entry")) {
+        RefuseExclusions(
+            "EtherealItemRules: configured exclusions refused; the shared item-type entry is not pristine.");
+        return;
+    }
+    if (!InstallExclusionHook()) {
+        RefuseExclusions(
+            "EtherealItemRules: configured exclusions refused; item-type hook installation failed.");
+        return;
+    }
+    if (!TryTransitionExclusionState(
+            ExclusionState::Installing,
+            ExclusionState::Active)) {
+        return;
+    }
+    if (Context) {
+        Context->LogInfo(
+            "EtherealItemRules: configured exclusions active after DataTablesLoaded.");
+    }
+}
+
+auto RegisterExclusionLifecycle() noexcept -> bool {
+    if (!HasExcludedItemTypes(Settings)) {
+        ExclusionsState.store(ExclusionState::Disabled, std::memory_order_release);
+        return true;
+    }
+    if (Context->QueryService(
+            D2RL::ServiceId::Lifecycle,
+            D2RL::LifecycleServiceV1Version,
+            &Lifecycle) != D2RL::ServiceQueryResult::Success
+        || !D2RL::HasLifecycleServiceV1Field(
+            Lifecycle, D2RL::LifecycleServiceV1RequiredSize)
+        || Lifecycle->registerDataTablesLoadedListener == nullptr
+        || Lifecycle->unregisterDataTablesLoadedListener == nullptr) {
+        Lifecycle = nullptr;
+        TryTransitionExclusionState(
+            ExclusionState::Disabled,
+            ExclusionState::Refused);
+        Context->LogError(
+            "EtherealItemRules: LifecycleServiceV1 is required for configured exclusions.");
+        return false;
+    }
+
+    if (!TryTransitionExclusionState(
+            ExclusionState::Disabled,
+            ExclusionState::Pending)) {
+        Context->LogError(
+            "EtherealItemRules: exclusion state could not enter pending.");
+        return false;
+    }
+    const D2RL::Lifecycle::DataTablesLoadedListener listener{
+        .structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize,
+        .flags = 0,
+        .callback = OnDataTablesLoaded,
+        .userData = nullptr,
+    };
+    if (Lifecycle->registerDataTablesLoadedListener(
+            Context, &listener, &ExclusionListenerHandle)
+            != D2RL::Lifecycle::Result::Success
+        || ExclusionListenerHandle == D2RL::Lifecycle::InvalidHandle) {
+        ExclusionListenerHandle = D2RL::Lifecycle::InvalidHandle;
+        TryTransitionExclusionState(
+            ExclusionState::Pending,
+            ExclusionState::Refused);
+        Context->LogError(
+            "EtherealItemRules: DataTablesLoaded listener registration failed; exclusions refused.");
+        return false;
+    }
+    ExclusionListenerRegistered = true;
     return true;
 }
 
@@ -431,11 +597,12 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Ethereal Item Rules 1.0.2: enabled=%s; exclusions=%s types=[%s] "
+        "Ethereal Item Rules 1.0.3: enabled=%s; exclusions=%s state=%s types=[%s] "
         "resolved=%u unresolved=%u prevented=%llu; generation=%s "
         "chance=%u%% set=%s indestructible=%s; diagnostics=%s.",
         Settings.enabled ? "true" : "false",
         Settings.exclusions.enabled ? "enabled" : "disabled",
+        ExclusionStateText(ExclusionsState.load(std::memory_order_acquire)),
         types,
         ResolvedTypeCount.load(std::memory_order_relaxed),
         UnresolvedTypeCount.load(std::memory_order_relaxed),
@@ -480,11 +647,20 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     const auto* runtimeBuild = D2RL::GetBuildName(context);
     char buildMessage[192]{};
     std::snprintf(buildMessage, sizeof(buildMessage),
-        "EtherealItemRules: observed D2R build-name=%s; validating the complete native fingerprint.",
+        "EtherealItemRules: observed D2R build-name=%s; validating the non-deferred native fingerprint.",
         runtimeBuild && runtimeBuild[0] != '\0' ? runtimeBuild : "unknown");
     context->LogInfo(buildMessage);
     if (!ValidateRuntime()) return false;
-    if (!InstallRulePatches() || !InstallExclusionHook()) return false;
+    if (!RegisterExclusionLifecycle()) return false;
+    if (!InstallRulePatches()) {
+        if (HasExcludedItemTypes(Settings)) {
+            TryTransitionExclusionState(
+                ExclusionState::Pending,
+                ExclusionState::Refused);
+        }
+        UnregisterExclusionListener();
+        return false;
+    }
 
     if (!context->RegisterConsoleCommand(
             "ethereal-item-rules",
@@ -498,11 +674,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         message,
         sizeof(message),
-        "Ethereal Item Rules 1.0.2 by RuffnecKk loaded: enabled=%s; exclusions=%s "
-        "(%zu types); generation=%s; chance=%u%%; set=%s; "
+        "Ethereal Item Rules 1.0.3 by RuffnecKk loaded: enabled=%s; exclusions=%s "
+        "state=%s (%zu types); generation=%s; chance=%u%%; set=%s; "
         "indestructible=%s; diagnostics=%s.",
         Settings.enabled ? "true" : "false",
         Settings.exclusions.enabled ? "enabled" : "disabled",
+        ExclusionStateText(ExclusionsState.load(std::memory_order_acquire)),
         Settings.exclusions.itemTypeCount,
         Settings.generation.enabled ? "enabled" : "disabled",
         static_cast<unsigned>(Settings.generation.chancePercent),
@@ -516,6 +693,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+    if (Context) {
+        {
+            const std::lock_guard lock(ExclusionLifecycleMutex);
+            StopExclusions();
+        }
+        UnregisterExclusionListener();
+    }
     ResetState();
     Settings = {};
     Base = 0;

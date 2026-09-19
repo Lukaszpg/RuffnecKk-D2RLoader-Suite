@@ -8,6 +8,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         OFF
     )
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
+    add_subdirectory(../../common "${CMAKE_BINARY_DIR}/_deps/common")
 else()
     enable_language(RC)
 endif()
@@ -46,6 +47,7 @@ set_property(
 target_compile_features(ruffneckk_bulk_currency_deposit PRIVATE cxx_std_20)
 target_link_libraries(ruffneckk_bulk_currency_deposit PRIVATE
     D2RLPlugin::D2RLPlugin
+    RuffnecKk::Common
     tomlplusplus::tomlplusplus
 )
 set_target_properties(ruffneckk_bulk_currency_deposit PROPERTIES
@@ -78,6 +80,7 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
     target_link_libraries(ruffneckk_bulk_currency_deposit_tests PRIVATE
+        RuffnecKk::Common
         tomlplusplus::tomlplusplus
     )
     target_compile_definitions(ruffneckk_bulk_currency_deposit_tests PRIVATE

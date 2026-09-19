@@ -485,12 +485,12 @@ foreach ($entry in $pluginEntries) {
         $errors.Add("$slug contains a forbidden D2R build-name allowlist.")
     }
     $hasBuildDiagnostic = $runtimeSourceText -match 'GetBuildName\s*\('
-    $hasFingerprintDiagnostic = $runtimeSourceText -match 'validating (?:the complete )?native fingerprint' -or
+    $hasFingerprintDiagnostic = $runtimeSourceText -match 'validating (?:the complete |the non-deferred )?native fingerprint' -or
         $runtimeSourceText -match 'validating the native foundation' -or
         $runtimeSourceText -match 'native fingerprint accepted' -or
         $runtimeSourceText -match 'complete fail-closed fingerprint'
     if (-not $hasBuildDiagnostic -or -not $hasFingerprintDiagnostic) {
-        $errors.Add("$slug must log the observed build name and gate native work through its complete fingerprint.")
+        $errors.Add("$slug must log the observed build name and gate native work through its fingerprint checks.")
     }
 
     $publicConfigRoot = Join-Path $pluginDirectory 'config'

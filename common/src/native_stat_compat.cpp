@@ -112,8 +112,57 @@ template <typename Value>
         && At(core.base, slotRva, expected) && resolved == expected;
 }
 
+[[nodiscard]] auto MatchesFunctionStructure(const MemoryReader& reader, const AddressRange& core,
+        const FunctionWitness& function, std::size_t trackedPrefixBytes = 0) noexcept -> bool {
+    std::uintptr_t functionAddress{};
+    std::uintptr_t unwindAddress{};
+    const auto functionSize = HexSize(function.expectedHex);
+    const auto hasUnwind = !function.unwind.expectedHex.empty();
+    if (functionSize == 0 || trackedPrefixBytes > functionSize
+        || reader.validateUnwind == nullptr || !At(core.base, function.rva, functionAddress)
+        || !reader.validateUnwind(reader.userData, core.base, function.rva, functionSize,
+            function.unwind.rva, hasUnwind)) return false;
+    if (hasUnwind && (!At(core.base, function.unwind.rva, unwindAddress)
+        || !MatchesHex(reader, core, unwindAddress, function.unwind.expectedHex))) return false;
+    if (trackedPrefixBytes != 0) {
+        std::uintptr_t tailAddress{};
+        if (!AddOffset(functionAddress, trackedPrefixBytes, tailAddress)
+            || !MatchesHex(reader, core, tailAddress,
+                function.expectedHex.substr(trackedPrefixBytes * 2))) return false;
+    }
+    const auto prefixEnd = static_cast<std::uint64_t>(function.rva) + trackedPrefixBytes;
+    for (const auto& call : function.directCalls) {
+        if (trackedPrefixBytes != 0 && call.siteRva < prefixEnd) continue;
+        if (!MatchesDirectCall(reader, core, call.siteRva, call.targetRva)) return false;
+    }
+    for (const auto& call : function.indirectCalls) {
+        if (trackedPrefixBytes != 0 && call.siteRva < prefixEnd) continue;
+        if (!MatchesIndirectCall(reader, core, call.siteRva, call.slotRva)) return false;
+    }
+    for (const auto& data : function.readOnlyData) {
+        if (trackedPrefixBytes != 0 && data.dataRva < prefixEnd
+            && static_cast<std::uint64_t>(data.dataRva) + HexSize(data.expectedHex)
+                > function.rva) continue;
+        std::uintptr_t dataAddress{};
+        if (!At(core.base, data.dataRva, dataAddress) || !MatchesHex(reader, core, dataAddress, data.expectedHex)) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] auto DecodeHex(std::string_view hex, std::span<std::byte> output) noexcept -> bool {
+    if (HexSize(hex) != output.size()) return false;
+    for (std::size_t index = 0; index < output.size(); ++index) {
+        const auto high = HexNibble(hex[index * 2]);
+        const auto low = HexNibble(hex[index * 2 + 1]);
+        if (high == 0xFF || low == 0xFF) return false;
+        output[index] = static_cast<std::byte>((high << 4) | low);
+    }
+    return true;
+}
+
 [[nodiscard]] auto MatchesProvider(const MemoryReader& reader, const AddressRange& main,
-        const AddressRange& core, const HelperWitness& helper) noexcept -> bool {
+        const AddressRange& core, const HelperWitness& helper,
+        const TransformDiagnostics& diagnostics) noexcept -> bool {
     std::uintptr_t entry{};
     std::uintptr_t slot{};
     std::uintptr_t expectedExport{};
@@ -135,21 +184,45 @@ template <typename Value>
 
     for (const auto& function : helper.functions) {
         std::uintptr_t functionAddress{};
-        std::uintptr_t unwindAddress{};
-        const auto functionSize = HexSize(function.expectedHex);
-        const auto hasUnwind = !function.unwind.expectedHex.empty();
-        if (functionSize == 0 || reader.validateUnwind == nullptr || !At(core.base, function.rva, functionAddress)
-            || !MatchesHex(reader, core, functionAddress, function.expectedHex)
-            || !reader.validateUnwind(reader.userData, core.base, function.rva, functionSize,
-                function.unwind.rva, hasUnwind)) return false;
-        if (hasUnwind && (!At(core.base, function.unwind.rva, unwindAddress)
-            || !MatchesHex(reader, core, unwindAddress, function.unwind.expectedHex))) return false;
-        for (const auto& call : function.directCalls) if (!MatchesDirectCall(reader, core, call.siteRva, call.targetRva)) return false;
-        for (const auto& call : function.indirectCalls) if (!MatchesIndirectCall(reader, core, call.siteRva, call.slotRva)) return false;
-        for (const auto& data : function.readOnlyData) {
-            std::uintptr_t dataAddress{};
-            if (!At(core.base, data.dataRva, dataAddress) || !MatchesHex(reader, core, dataAddress, data.expectedHex)) return false;
+        if (!At(core.base, function.rva, functionAddress)) return false;
+        const bool pristine = MatchesHex(reader, core, functionAddress, function.expectedHex);
+        const bool structureMatches = MatchesFunctionStructure(
+            reader,
+            core,
+            function,
+            pristine ? 0U : function.trackedPrefixBytes);
+        if (function.rva != helper.exportRva) {
+            if (!pristine || !structureMatches) return false;
+            continue;
         }
+
+        const bool targetExecutable = pristine
+            || (reader.validateExecutable != nullptr
+                && reader.validateExecutable(reader.userData, functionAddress));
+        TrackedNativeTransform::Observation observation{
+            .state = TrackedNativeTransform::State::Unchanged,
+            .kind = TrackedNativeTransform::Kind::Unknown,
+            .ownerCount = 0,
+            .ownerPluginId = {},
+            .targetExecutable = targetExecutable,
+            .structuralWitnessesMatch = structureMatches,
+        };
+        if (!pristine) {
+            const auto size = HexSize(function.expectedHex);
+            std::array<std::byte, 4096> expected{};
+            if (size == 0 || size > expected.size() || diagnostics.observe == nullptr
+                || !DecodeHex(function.expectedHex, {expected.data(), size})
+                || !diagnostics.observe(diagnostics.userData, main.base, functionAddress,
+                    {expected.data(), size}, observation)) return false;
+            // Diagnostics establishes tracked ownership only. The common adapter
+            // independently preserves executable and structural witnesses.
+            observation.targetExecutable = targetExecutable;
+            observation.structuralWitnessesMatch = structureMatches;
+        }
+        const auto admission = TrackedNativeTransform::Evaluate(observation, pristine,
+            "celestialrayone.max-life-one", TrackedNativeTransform::Kind::InlineHook);
+        if ((pristine && admission != TrackedNativeTransform::Admission::Pristine)
+            || (!pristine && admission != TrackedNativeTransform::Admission::TrackedCompatible)) return false;
     }
 
     std::array<std::uint64_t, 3> descriptor{};
@@ -233,6 +306,15 @@ template <typename Value>
     }
 }
 
+[[nodiscard]] auto ValidateCurrentExecutable(void*, std::uintptr_t address) noexcept -> bool {
+    MEMORY_BASIC_INFORMATION information{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &information, sizeof(information)) != sizeof(information)
+        || information.State != MEM_COMMIT || (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
+    const auto protection = information.Protect & 0xFF;
+    return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ
+        || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+}
+
 #include "native_stat_compat_contract.inc"
 
 } // namespace
@@ -244,7 +326,8 @@ auto AddressRange::Contains(std::uintptr_t address, std::size_t length) const no
 void Adapter::Reset() noexcept { entries_ = {}; routes_ = {}; admitted_ = 0; required_ = 0; failure_ = Failure::InvalidArguments; }
 
 auto Adapter::Bind(const MemoryReader& reader, AddressRange mainImage, AddressRange coreImage,
-        const AdmissionContract& contract, HelperMask required) noexcept -> bool {
+        const AdmissionContract& contract, HelperMask required,
+        TransformDiagnostics diagnostics) noexcept -> bool {
     Reset();
     if (reader.read == nullptr || mainImage.size == 0
         || contract.helpers.size() != entries_.size() || required == 0 || (required & ~ToMask(Helper::All)) != 0) return false;
@@ -260,7 +343,7 @@ auto Adapter::Bind(const MemoryReader& reader, AddressRange mainImage, AddressRa
             admitted_ |= 1U << index;
             continue;
         }
-        if (MatchesProvider(reader, mainImage, coreImage, helper)) {
+        if (MatchesProvider(reader, mainImage, coreImage, helper, diagnostics)) {
             entries_[index] = entry;
             routes_[index] = Route::ProviderWide;
             admitted_ |= 1U << index;
@@ -276,6 +359,11 @@ auto Adapter::Bind(const MemoryReader& reader, AddressRange mainImage, AddressRa
 
 auto Adapter::BindCurrentProcess(std::uintptr_t mainImageBase, HelperMask required,
         const AdmissionContract& contract) noexcept -> bool {
+    return BindCurrentProcess(mainImageBase, required, {}, contract);
+}
+
+auto Adapter::BindCurrentProcess(std::uintptr_t mainImageBase, HelperMask required,
+        TransformDiagnostics diagnostics, const AdmissionContract& contract) noexcept -> bool {
     Reset();
     AddressRange main{};
     AddressRange core{};
@@ -288,7 +376,7 @@ auto Adapter::BindCurrentProcess(std::uintptr_t mainImageBase, HelperMask requir
         std::uintptr_t entry{};
         std::array<std::byte, 2> opcode{};
         if (!At(main.base, helper.nativeRva, entry)) return false;
-        if (MatchesHex({nullptr, ReadCurrentProcess, ValidateCurrentUnwind}, main, entry, helper.canonicalExpectedHex)) continue;
+        if (MatchesHex({nullptr, ReadCurrentProcess, ValidateCurrentUnwind, ValidateCurrentExecutable}, main, entry, helper.canonicalExpectedHex)) continue;
         if (!ReadCurrentProcess(nullptr, entry, opcode.data(), opcode.size())
             || std::to_integer<std::uint8_t>(opcode[0]) != 0xFF || std::to_integer<std::uint8_t>(opcode[1]) != 0x25) return false;
         needsCore = true;
@@ -297,7 +385,7 @@ auto Adapter::BindCurrentProcess(std::uintptr_t mainImageBase, HelperMask requir
         const auto coreModule = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"D2RCore.dll"));
         if (!ImageRange(coreModule, core)) return false;
     }
-    return Bind({nullptr, ReadCurrentProcess, ValidateCurrentUnwind}, main, core, contract, required);
+    return Bind({nullptr, ReadCurrentProcess, ValidateCurrentUnwind, ValidateCurrentExecutable}, main, core, contract, required, diagnostics);
 }
 
 auto Adapter::GetUnitStat(void* unit, std::int32_t stat, std::uint16_t layer) const noexcept -> std::int32_t { if (!IsAdmitted(Helper::GetUnitStat)) return 0; return routes_[0] == Route::ProviderWide ? reinterpret_cast<ReadWideFn>(entries_[0])(unit, stat, static_cast<std::uint32_t>(layer)) : reinterpret_cast<ReadLegacyFn>(entries_[0])(unit, stat, layer); }

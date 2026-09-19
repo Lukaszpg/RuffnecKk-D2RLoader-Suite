@@ -96,11 +96,11 @@ constexpr std::array QuestRouteGraph{
     QuestRouteEdge{123, 124}, // Halls of Pain -> Halls of Vaught
 };
 
-// Class ids are exact D2R 3.3 Objects.txt records consumed by generated
-// PresetUnit records. Monster, SuperUnique and MonPlace presets deliberately
-// remain excluded because their encoded ids depend on active table counts and
-// no governed runtime decoder exists. Diablo seals are also excluded to avoid
-// five simultaneous lines.
+// Class ids are exact D2R 3.3 records consumed by generated PresetUnit records.
+// Izual's type-1 MonPreset resolves directly to stable MonStats class 256 before
+// publication. SuperUnique and MonPlace presets remain excluded because their
+// encoded ids depend on active table counts. Diablo seals are also excluded to
+// avoid five simultaneous lines.
 constexpr std::array QuestPresetWitnesses{
     QuestPresetWitness{4, PresetObject, 21},   // Cairn Stone Lambda
     QuestPresetWitness{5, PresetObject, 30},   // Tree of Inifuss
@@ -124,6 +124,7 @@ constexpr std::array QuestPresetWitnesses{
     QuestPresetWitness{94, PresetObject, 193}, // Lam Esen's Tome
     QuestPresetWitness{83, PresetObject, 404}, // Compelling Orb
 
+    QuestPresetWitness{105, PresetMonster, 256}, // Izual
     QuestPresetWitness{107, PresetObject, 376}, // Hellforge
 
     QuestPresetWitness{

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "component": "PlayerXScalingTweaks",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "source": "reverse-engineering/d2r-3.2.92777/analysis-cache/images/D2R-3.2.92777-decrypted.exe",
   "sourceSha256": "CC59119DC2A6C7D43D088098FC162EAFA4AE1299B2079126AEF43C1ACA914715",
   "equivalentAnalysisSource": "reverse-engineering/d2r-3.2.92777/analysis-cache/images/D2R-3.2.92777-analysis.exe",

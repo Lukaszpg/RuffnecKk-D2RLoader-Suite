@@ -1,12 +1,12 @@
 # RuffnecKk MapSense
 
-RuffnecKk MapSense 2.0.0 is a D2RLoader client plugin for Diablo II: Resurrected.
+RuffnecKk MapSense 2.0.1 is a D2RLoader client plugin for Diablo II: Resurrected.
 It adds helper-generated GPS Walking and GPS Teleport routes while retaining the
 independent Direct Line mode. Direct lines require neither the helper nor a
 walkability grid and may cross walls. GPS Walking uses helper-generated routes,
 walkability-grid validation, continuous player following, and verified
 reconnection. GPS Teleport uses helper-generated route steps without applying
-the walking grid. MapSense 2.0.0 targets the D2RLoader 1.3 release environment
+the walking grid. MapSense 2.0.1 targets the D2RLoader 1.3 release environment
 while retaining PluginSDK API v3 as its binary interface.
 
 The prior 1.0.3 compatibility candidate retained 1.0.2 and recognized both the complete
@@ -627,9 +627,10 @@ real destination families:
   outdoor hubs ignore optional entrances, and shared campaign quest routes
   stay green; after Duriel's quest is rewarded, the correct Tal Rasha tomb
   remains a green farming destination;
-- red lines to whitelisted normal-quest side routes and proven quest-object
-  presets, independent of quest-log state; the Canyon keeps its exact
-  red-before-reward and green-after-reward exception;
+- red lines to whitelisted normal-quest side routes and proven quest POIs,
+  including Izual's exact generated monster preset in the Plains of Despair,
+  independent of quest-log state; the Canyon keeps its exact red-before-reward
+  and green-after-reward exception;
 - purple lines to directly connected levels selected by the player.
 
 Activation, color, and common line thickness for all four families are edited
@@ -945,8 +946,13 @@ MapSense 0.12.0 no longer hooks `ExecuteCommandLists` process-wide or assumes
 that the first observed Direct queue owns D2R's swap chain. It intercepts the
 standard DXGI `CreateSwapChain*` entry points and records the exact Direct
 command queue supplied for each returned swap chain. `Present` is always passed
-through, but MapSense submits no GPU work unless that exact association and the
-swap-chain device identity both match.
+through, but MapSense submits no GPU work unless that exact creation-time
+association is recovered for the presented swap chain. Renderer resources use
+the device returned by that exact queue. Native Windows normally exposes the
+same canonical device identity through the swap chain; compatibility layers may
+expose distinct wrappers, which are admitted only when both device lookups
+succeed and report the same adapter LUID. A missing exact association, failed
+device lookup, or adapter mismatch remains fail-closed.
 
 The renderer becomes permanently fail-closed for the process after a queue
 identity change, fence failure, allocator/list failure, queue-signal failure,

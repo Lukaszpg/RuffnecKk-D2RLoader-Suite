@@ -1,6 +1,10 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 
 #include <D2RLPlugin/api.h>
+#include <RuffnecKk/tracked_native_transform.hpp>
+#include <RuffnecKk/tracked_native_transform_d2rl.hpp>
 
 #include "armageddon_ctc_policy.hpp"
 
@@ -15,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -130,6 +135,7 @@ std::string LoadedConfigPath{"built-in defaults"};
 std::string RuntimeBuildName{"unknown"};
 HANDLE SingletonHandle{};
 std::atomic_bool Operational{};
+std::atomic_bool CompatibilityInactive{};
 
 GetSkillsRecordFn GetSkillsRecord{};
 CheckStateFn CheckState{};
@@ -463,8 +469,69 @@ bool Check(
     return false;
 }
 
-bool ValidateRuntime() noexcept {
-    return Check(
+bool IsExecutableAddress(const void* address) noexcept {
+    MEMORY_BASIC_INFORMATION information{};
+    if (!address || VirtualQuery(address, &information, sizeof(information))
+            != sizeof(information)
+            || information.State != MEM_COMMIT
+            || (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    switch (information.Protect & 0xFFU) {
+    case PAGE_EXECUTE:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+SharedStartLoadMode ValidateSharedStartOwnership() noexcept {
+    using namespace RuffnecKk::TrackedNativeTransform;
+    constexpr std::size_t PatchedPrefixSize = 8;
+    const bool pristine = MatchesFingerprint(
+        Base + SharedStartRva, SharedStartExpected);
+    if (pristine) return SharedStartLoadMode::InstallHooks;
+
+    Observation observation{};
+    const auto expectedBytes = std::as_bytes(std::span{SharedStartExpected});
+    if (!RuffnecKk::TrackedNativeTransform::ObserveD2RL(
+            const_cast<D2RL::PluginContext*>(Context),
+            reinterpret_cast<std::uintptr_t>(Base),
+            reinterpret_cast<std::uintptr_t>(Base + SharedStartRva),
+            expectedBytes,
+            observation)) {
+        Context->LogError(
+            "ArmageddonCtCFix: Armageddon/Hurricane start callback differs from vanilla and has no complete tracked owner proof; plugin refused.");
+        return SharedStartLoadMode::Refuse;
+    }
+    observation.targetExecutable = IsExecutableAddress(Base + SharedStartRva);
+    observation.structuralWitnessesMatch =
+        SharedStartExpected.size() > PatchedPrefixSize
+        && std::memcmp(
+            Base + SharedStartRva + PatchedPrefixSize,
+            SharedStartExpected.data() + PatchedPrefixSize,
+            SharedStartExpected.size() - PatchedPrefixSize) == 0;
+    const auto admission = Evaluate(
+        observation,
+        false,
+        "celestialrayone.armageddon-aura",
+        Kind::InlineHook);
+    const auto loadMode = SelectSharedStartLoadMode(admission);
+    if (loadMode == SharedStartLoadMode::CompatibilityInactive) {
+        Context->LogInfo(
+            "ArmageddonCtCFix: celestialrayone.armageddon-aura owns the shared start callback; loaded compatibility-inactive, with hooks/features inactive and no RuffnecKk hooks installed.");
+        return loadMode;
+    }
+    Context->LogError(
+        "ArmageddonCtCFix: Armageddon/Hurricane start callback ownership or unchanged-tail proof was rejected; plugin refused.");
+    return SharedStartLoadMode::Refuse;
+}
+
+SharedStartLoadMode ValidateRuntime() noexcept {
+    if (!(Check(
             GetSkillsRecordRva,
             GetSkillsRecordExpected,
             "SkillsTxt lookup")
@@ -485,13 +552,12 @@ bool ValidateRuntime() noexcept {
             ArmageddonActiveExpected,
             "Armageddon active callback")
         && Check(
-            SharedStartRva,
-            SharedStartExpected,
-            "Armageddon/Hurricane start callback")
-        && Check(
             ItemEffectHelperRva,
             ItemEffectHelperExpected,
-            "item-effect helper");
+            "item-effect helper"))) {
+        return SharedStartLoadMode::Refuse;
+    }
+    return ValidateSharedStartOwnership();
 }
 
 void ResolveNativeFunctions() noexcept {
@@ -843,8 +909,11 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Armageddon-Hurricane CtC Fix 1.0.0: %s; helper calls=%llu; record bridges=%llu; real-skill starts=%llu; synthetic starts=%llu; synthetic active calls=%llu; expired seed cleanups=%llu; retained seeds=%zu; config=%s.",
-        Operational.load(std::memory_order_acquire) ? "active" : "disabled",
+        "Armageddon-Hurricane CtC Fix 1.0.1: %s; helper calls=%llu; record bridges=%llu; real-skill starts=%llu; synthetic starts=%llu; synthetic active calls=%llu; expired seed cleanups=%llu; retained seeds=%zu; config=%s.",
+        Operational.load(std::memory_order_acquire) ? "active"
+            : CompatibilityInactive.load(std::memory_order_acquire)
+                ? "compatibility-inactive (CelestialRay/celestialrayone.armageddon-aura owns shared start callback; hooks/features inactive)"
+                : "disabled",
         static_cast<unsigned long long>(
             ItemEffectCalls.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
@@ -865,6 +934,7 @@ auto Status(
 
 void ResetState() noexcept {
     Operational.store(false, std::memory_order_release);
+    CompatibilityInactive.store(false, std::memory_order_release);
     ActiveItemScope = {};
     {
         std::lock_guard lock(BridgeMutex);
@@ -878,6 +948,16 @@ void ResetState() noexcept {
     ExpiredSeedCleanups.store(0, std::memory_order_relaxed);
 }
 
+void RegisterStatusCommand() noexcept {
+    if (!Context->RegisterConsoleCommand(
+            "armageddon-ctc-fix",
+            Status,
+            "Show Armageddon-Hurricane CtC Fix status and counters.")) {
+        Context->LogWarn(
+            "ArmageddonCtCFix: status command could not be registered.");
+    }
+}
+
 } // namespace
 } // namespace RuffnecKk::ArmageddonCtCFix
 
@@ -888,7 +968,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-armageddon-hurricane-ctc-fix",
     .name = "Armageddon-Hurricane CtC Fix",
-    .version = "1.0.0",
+    .version = "1.0.1",
     .author = "RuffnecKk",
     .description = "Lets Armageddon trigger from chance-to-cast effects.",
     .flags = D2RL::PluginFlags::Server | D2RL::PluginFlags::NativeHooks,
@@ -918,7 +998,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
     if (!Settings.enabled) {
         const auto message = std::string(
-            "Armageddon-Hurricane CtC Fix 1.0.0 by RuffnecKk loaded disabled; config=")
+            "Armageddon-Hurricane CtC Fix 1.0.1 by RuffnecKk loaded disabled; config=")
             + LoadedConfigPath + "; build=" + RuntimeBuildName + ".";
         context->LogInfo(message.c_str());
         return true;
@@ -929,9 +1009,19 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         ReleaseSingleton();
         return false;
     }
-    if (!ValidateRuntime()) {
+    const auto sharedStartLoadMode = ValidateRuntime();
+    if (sharedStartLoadMode == SharedStartLoadMode::Refuse) {
         ReleaseSingleton();
         return false;
+    }
+    if (sharedStartLoadMode == SharedStartLoadMode::CompatibilityInactive) {
+        CompatibilityInactive.store(true, std::memory_order_release);
+        RegisterStatusCommand();
+        const auto message = std::string(
+            "Armageddon-Hurricane CtC Fix 1.0.1 by RuffnecKk loaded compatibility-inactive because CelestialRay/celestialrayone.armageddon-aura owns the shared start callback; hooks/features are inactive; config=")
+            + LoadedConfigPath + "; build=" + RuntimeBuildName + ".";
+        context->LogInfo(message.c_str());
+        return true;
     }
     {
         const auto message = std::string(
@@ -956,15 +1046,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
 
     Operational.store(true, std::memory_order_release);
-    if (!context->RegisterConsoleCommand(
-            "armageddon-ctc-fix",
-            Status,
-            "Show Armageddon-Hurricane CtC Fix status and counters.")) {
-        context->LogWarn(
-            "ArmageddonCtCFix: status command could not be registered.");
-    }
+    RegisterStatusCommand();
     const auto message = std::string(
-        "Armageddon-Hurricane CtC Fix 1.0.0 by RuffnecKk active; config=")
+        "Armageddon-Hurricane CtC Fix 1.0.1 by RuffnecKk active; config=")
         + LoadedConfigPath + "; build=" + RuntimeBuildName + ".";
     context->LogInfo(message.c_str());
     return true;

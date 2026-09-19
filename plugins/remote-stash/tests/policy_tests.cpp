@@ -532,9 +532,14 @@ int main(int argc, char** argv) {
     REQUIRE(layout.find("\"pressedFrame\": 2") != std::string::npos);
     REQUIRE(layout.find("\"disabledFrame\": 1") != std::string::npos);
     REQUIRE(layout.find("\"hoveredFrame\": 3") != std::string::npos);
+    REQUIRE(layout.find(
+        "\"tooltipString\": \"@d2r:OpenCurrentStashLegend\"")
+        != std::string::npos);
+    REQUIRE(layout.find(
+        "\"tooltipString\": \"@OpenCurrentStashLegend\"")
+        == std::string::npos);
     REQUIRE(layout.find("PanelManager:OpenPanel:RuffnecKkRemoteStash")
         != std::string::npos);
-    REQUIRE(layout.find("@OpenCurrentStashLegend") != std::string::npos);
     REQUIRE(layout.find("DropGold") == std::string::npos);
 
     const WidgetRect panel{0, 0, 1000, 1600};

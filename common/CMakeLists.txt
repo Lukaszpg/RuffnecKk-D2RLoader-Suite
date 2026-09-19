@@ -75,6 +75,11 @@ target_include_directories(RuffnecKkSuiteNativeStatCompat PUBLIC "${CMAKE_CURREN
 target_link_libraries(RuffnecKkSuiteNativeStatCompat PUBLIC RuffnecKk::BuildPolicy)
 
 if(BUILD_TESTING)
+    add_executable(ruffneckk_tracked_native_transform_tests tests/tracked_native_transform_tests.cpp)
+    target_link_libraries(ruffneckk_tracked_native_transform_tests PRIVATE RuffnecKk::BuildPolicy)
+    target_include_directories(ruffneckk_tracked_native_transform_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME ruffneckk.common.tracked-native-transform COMMAND ruffneckk_tracked_native_transform_tests)
+
     add_executable(ruffneckk_native_stat_compat_tests tests/native_stat_compat_tests.cpp)
     target_link_libraries(ruffneckk_native_stat_compat_tests PRIVATE RuffnecKk::NativeStatCompat)
     add_test(NAME ruffneckk.common.native-stat-compat COMMAND ruffneckk_native_stat_compat_tests)

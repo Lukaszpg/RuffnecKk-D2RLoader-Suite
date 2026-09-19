@@ -8,6 +8,6 @@
 enabled = true
 
 [diagnostics]
-# Logs the first few equipped-item transfers rewritten for the Cube.
-# Leave this false for normal play.
+# The console command always exposes bounded counters for every transfer gate.
+# Enabling this additionally logs the first few successful command rewrites.
 enabled = false

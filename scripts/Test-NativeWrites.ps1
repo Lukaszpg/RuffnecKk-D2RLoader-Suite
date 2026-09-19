@@ -361,8 +361,8 @@ function Invoke-NativeWriteValidation {
         } | ForEach-Object { [string]$_.componentId })
         Assert-SameStringSet -Expected $expectedPluginIds -Actual $manifestPluginIds -Label 'Suite plugin IDs'
     }
-    if ($manifestPluginIds.Count -ne 23) {
-        throw "Native-write manifest must contain 23 Suite plugin IDs; found $($manifestPluginIds.Count)."
+    if ($manifestPluginIds.Count -ne 22) {
+        throw "Native-write manifest must contain 22 Suite plugin IDs; found $($manifestPluginIds.Count)."
     }
 
     $suiteRanges = [System.Collections.Generic.List[object]]::new()
@@ -518,14 +518,8 @@ function Invoke-NativeWriteValidation {
     Assert-NoOverlaps -Ranges @($externalRanges) -Label 'Yinyin-to-yinyin'
 
     $requiredCallThroughs = @{
-        'EE2A0' = @(
-            'ruffneckk-equipped-item-to-cube',
-            'ruffneckk-mass-identify',
-            'ruffneckk-remote-stash'
-        )
         '373890' = @(
             'ruffneckk-ethereal-item-rules',
-            'ruffneckk-charm-aura-trigger-fix',
             'ruffneckk-enhanced-damage-min-max-fix',
             'ruffneckk-progressive-affixes'
         )
@@ -710,7 +704,7 @@ if ($SelfTest) {
     $selfTestCount++
 
     $externalOwnerDrift = Copy-JsonObject -Object $manifest
-    $externalOwnerDrift.composableCallThroughs[3].ownerPluginId = 'monsterdisplay'
+    $externalOwnerDrift.composableCallThroughs[2].ownerPluginId = 'monsterdisplay'
     Assert-Throws -Label 'external composable owner drift' -Action {
         Invoke-NativeWriteValidation -Manifest $externalOwnerDrift -Allowlist $allowlist -ExternalCompatibility $externalCompatibility -Root $RepositoryRoot
     }

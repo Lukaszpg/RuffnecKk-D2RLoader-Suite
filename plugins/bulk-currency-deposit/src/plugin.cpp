@@ -1,4 +1,6 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <D2RLPlugin/api.h>
 #include <D2RLPlugin/diagnostics.h>
 #include <D2RLPlugin/input.h>
@@ -100,6 +102,7 @@ constexpr std::uintptr_t CanDepositToAdvancedStashRva = 0x15A0B0;
 constexpr std::uintptr_t TransferItemToInventoryPageRva = 0x15F8B0;
 constexpr std::uintptr_t FinishInventoryInteractionRva = 0x1A0780;
 constexpr std::uintptr_t IsItemInteractionBlockedRva = 0x1C7360;
+constexpr std::size_t IsItemInteractionBlockedDisplacedBytes = 14;
 constexpr std::uintptr_t GetUnitIdRva = 0x34A330;
 constexpr std::uintptr_t GetUnitInventoryRva = 0x34A360;
 constexpr std::uintptr_t GetItemDataRva = 0x34A500;
@@ -342,7 +345,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "bulk-currency-deposit",
     .name = "Bulk Currency Deposit",
-    .version = "1.1.2",
+    .version = "1.1.3",
     .author = "RuffnecKk",
     .description = "Auto transfers all your stackable currency items into their respective stash slots.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -398,82 +401,156 @@ bool QueryDiagnosticsService() noexcept {
     return true;
 }
 
-bool ValidateUiStateEntry() noexcept {
-    if (!DiagnosticsService) {
-        if (AcceptUiStateEntry(
-                UiStateEntryStatus::Unchanged,
-                Matches(IsUiStateOpenRva, IsUiStateOpenExpected),
-                false,
-                0,
-                {})) {
-            return true;
-        }
-        Context->LogError(
-            "BulkCurrencyDeposit: UI_IsStateOpen differs from its vanilla signature and no DiagnosticsService owner proof is available.");
-        return false;
+constexpr auto ToTrackedNativeTransformState(
+        D2RL::Diagnostics::ModificationState state) noexcept
+        -> RuffnecKk::TrackedNativeTransform::State {
+    switch (state) {
+    case D2RL::Diagnostics::ModificationState::Unchanged:
+        return RuffnecKk::TrackedNativeTransform::State::Unchanged;
+    case D2RL::Diagnostics::ModificationState::Tracked:
+        return RuffnecKk::TrackedNativeTransform::State::Tracked;
+    case D2RL::Diagnostics::ModificationState::Untracked:
+        return RuffnecKk::TrackedNativeTransform::State::Untracked;
     }
+    return RuffnecKk::TrackedNativeTransform::State::Untracked;
+}
+
+constexpr auto ToTrackedNativeTransformKind(
+        D2RL::Diagnostics::ModificationKind kind) noexcept
+        -> RuffnecKk::TrackedNativeTransform::Kind {
+    switch (kind) {
+    case D2RL::Diagnostics::ModificationKind::BytePatch:
+        return RuffnecKk::TrackedNativeTransform::Kind::BytePatch;
+    case D2RL::Diagnostics::ModificationKind::InlineHook:
+        return RuffnecKk::TrackedNativeTransform::Kind::InlineHook;
+    case D2RL::Diagnostics::ModificationKind::Multiple:
+        return RuffnecKk::TrackedNativeTransform::Kind::Multiple;
+    case D2RL::Diagnostics::ModificationKind::Unknown:
+        return RuffnecKk::TrackedNativeTransform::Kind::Unknown;
+    }
+    return RuffnecKk::TrackedNativeTransform::Kind::Unknown;
+}
+
+bool ValidateUiStateEntry() noexcept {
+    const auto pristineBytesMatch = Matches(
+        IsUiStateOpenRva, IsUiStateOpenExpected);
+    const auto strictPristine = [&]() noexcept {
+        return EvaluateUiStateEntry(
+            {RuffnecKk::TrackedNativeTransform::State::Unchanged,
+                RuffnecKk::TrackedNativeTransform::Kind::Unknown,
+                0U,
+                {},
+                IsExecutableAddress(Base + IsUiStateOpenRva),
+                true},
+            pristineBytesMatch)
+            == RuffnecKk::TrackedNativeTransform::Admission::Pristine;
+    };
+    if (!DiagnosticsService) return strictPristine();
 
     const D2RL::Diagnostics::HookQuery query{
         .structSize = D2RL::Diagnostics::HookQuerySize,
-        .flags = 0,
+        .flags = 0U,
         .rva = IsUiStateOpenRva,
         .expected = IsUiStateOpenExpected.data(),
         .expectedSize = static_cast<std::uint32_t>(
             IsUiStateOpenExpected.size()),
-        .reserved = 0,
+        .reserved = 0U,
     };
     D2RL::Diagnostics::HookStatus status{
         .structSize = D2RL::Diagnostics::HookStatusSize,
     };
-    const auto result = DiagnosticsService->queryHookStatus(
-        Context, &query, &status);
-    if (result != D2RL::Diagnostics::Result::Success
-            || status.structSize < D2RL::Diagnostics::HookStatusRequiredSize) {
-        Context->LogError(
-            "BulkCurrencyDeposit: DiagnosticsService could not validate UI_IsStateOpen.");
-        return false;
+    if (DiagnosticsService->queryHookStatus(Context, &query, &status)
+            != D2RL::Diagnostics::Result::Success
+        || status.structSize < D2RL::Diagnostics::HookStatusRequiredSize) {
+        return strictPristine();
     }
-    if (status.state == D2RL::Diagnostics::ModificationState::Unchanged) {
-        if (AcceptUiStateEntry(
-                UiStateEntryStatus::Unchanged,
-                Matches(IsUiStateOpenRva, IsUiStateOpenExpected),
-                false,
-                status.ownerCount,
-                {})) {
-            return true;
-        }
-        Context->LogError(
-            "BulkCurrencyDeposit: Diagnostics reported UI_IsStateOpen unchanged but its vanilla signature does not match.");
-        return false;
-    }
-
-    const auto ownerLength = std::find(
+    const auto ownerEnd = std::find(
         std::begin(status.ownerPluginId),
         std::end(status.ownerPluginId),
-        '\0') - std::begin(status.ownerPluginId);
+        '\0');
     const std::string_view owner{
         status.ownerPluginId,
-        static_cast<std::size_t>(ownerLength)};
-    const auto policyStatus =
-        status.state == D2RL::Diagnostics::ModificationState::Tracked
-            && status.kind
-                == D2RL::Diagnostics::ModificationKind::InlineHook
-        ? UiStateEntryStatus::TrackedInlineHook
-        : UiStateEntryStatus::Other;
-    if (AcceptUiStateEntry(
-            policyStatus,
-            false,
-            IsExecutableAddress(Base + IsUiStateOpenRva),
+        static_cast<std::size_t>(ownerEnd - std::begin(status.ownerPluginId))};
+    const auto admission = EvaluateUiStateEntry(
+        {ToTrackedNativeTransformState(status.state),
+            ToTrackedNativeTransformKind(status.kind),
             status.ownerCount,
-            owner)) {
+            owner,
+            IsExecutableAddress(Base + IsUiStateOpenRva),
+            true},
+        pristineBytesMatch);
+    if (admission != RuffnecKk::TrackedNativeTransform::Admission::Rejected) {
         return true;
     }
+    Context->LogError(
+        "BulkCurrencyDeposit: UI_IsStateOpen signature or tracked-owner proof failed.");
+    return false;
+}
 
+template<std::size_t Size>
+bool ValidateItemInteractionBlockedEntry(
+        const std::array<std::uint8_t, Size>& expected) noexcept {
+    static_assert(Size > IsItemInteractionBlockedDisplacedBytes);
+    const auto pristineBytesMatch = Matches(IsItemInteractionBlockedRva, expected);
+    const auto untouchedTailMatches = Base != nullptr && std::memcmp(
+        Base + IsItemInteractionBlockedRva
+            + IsItemInteractionBlockedDisplacedBytes,
+        expected.data() + IsItemInteractionBlockedDisplacedBytes,
+        expected.size() - IsItemInteractionBlockedDisplacedBytes) == 0;
+    const auto strictPristine = [&]() noexcept {
+        return EvaluateItemInteractionBlockedEntry(
+            {RuffnecKk::TrackedNativeTransform::State::Unchanged,
+                RuffnecKk::TrackedNativeTransform::Kind::Unknown,
+                0U,
+                {},
+                IsExecutableAddress(Base + IsItemInteractionBlockedRva),
+                true},
+            pristineBytesMatch,
+            untouchedTailMatches)
+            == RuffnecKk::TrackedNativeTransform::Admission::Pristine;
+    };
+    if (!DiagnosticsService) return strictPristine();
+
+    const D2RL::Diagnostics::HookQuery query{
+        .structSize = D2RL::Diagnostics::HookQuerySize,
+        .flags = 0U,
+        .rva = IsItemInteractionBlockedRva,
+        .expected = expected.data(),
+        .expectedSize = static_cast<std::uint32_t>(expected.size()),
+        .reserved = 0U,
+    };
+    D2RL::Diagnostics::HookStatus status{
+        .structSize = D2RL::Diagnostics::HookStatusSize,
+    };
+    if (DiagnosticsService->queryHookStatus(Context, &query, &status)
+            != D2RL::Diagnostics::Result::Success
+        || status.structSize < D2RL::Diagnostics::HookStatusRequiredSize) {
+        return strictPristine();
+    }
+    const auto ownerEnd = std::find(
+        std::begin(status.ownerPluginId),
+        std::end(status.ownerPluginId),
+        '\0');
+    const std::string_view owner{
+        status.ownerPluginId,
+        static_cast<std::size_t>(ownerEnd - std::begin(status.ownerPluginId))};
+    const auto admission = EvaluateItemInteractionBlockedEntry(
+        {ToTrackedNativeTransformState(status.state),
+            ToTrackedNativeTransformKind(status.kind),
+            status.ownerCount,
+            owner,
+            IsExecutableAddress(Base + IsItemInteractionBlockedRva),
+            true},
+        pristineBytesMatch,
+        untouchedTailMatches);
+    if (admission != RuffnecKk::TrackedNativeTransform::Admission::Rejected) {
+        return true;
+    }
     char message[320]{};
     std::snprintf(
         message,
         sizeof(message),
-        "BulkCurrencyDeposit: UI_IsStateOpen ownership refused (state=%u, kind=%u, owners=%u, owner=%.*s).",
+        "BulkCurrencyDeposit: UI_IsItemInteractionBlocked ownership refused (state=%u, kind=%u, owners=%u, owner=%.*s).",
         static_cast<unsigned>(status.state),
         static_cast<unsigned>(status.kind),
         status.ownerCount,
@@ -514,8 +591,14 @@ bool ValidateNativeFingerprint() noexcept {
         "CLIENT_TransferItemToInventoryPage");
     check(FinishInventoryInteractionRva, FinishInventoryInteractionExpected,
         "UI_FinishInventoryInteraction");
-    check(IsItemInteractionBlockedRva, IsItemInteractionBlockedExpected,
-        "UI_IsItemInteractionBlocked");
+    if (!ValidateItemInteractionBlockedEntry(
+            IsItemInteractionBlockedExpected)) {
+        valid = false;
+        if (Context) {
+            Context->LogError(
+                "BulkCurrencyDeposit: UI_IsItemInteractionBlocked signature or tracked-owner proof failed.");
+        }
+    }
     check(GetUnitIdRva, GetUnitIdExpected, "UNITS_GetUnitId");
     check(GetUnitInventoryRva, GetUnitInventoryExpected,
         "UNITS_GetInventory");
@@ -1597,7 +1680,7 @@ auto Status(
     std::snprintf(
         message,
         sizeof(message),
-        "Bulk Currency Deposit 1.1.2: enabled=%s; Controls=%s; defaultBinding=SHIFT+D; UI=%s; buttonResources=%s; inventoryButton=%s; buttonPosition=%d,%d; delay=%ums; include=%llu; exclude=%llu; batch=%s; pending=%llu; requests=%llu; buttonRequests=%llu; coalesced=%llu; refused=%llu; stale=%llu; empty=%llu; started=%llu; completed=%llu; cancelled=%llu; queued=%llu; transferred=%llu; failed=%llu; skipped=%llu; dispatchFailures=%llu; TOML=%s.",
+        "Bulk Currency Deposit 1.1.3: enabled=%s; Controls=%s; defaultBinding=SHIFT+D; UI=%s; buttonResources=%s; inventoryButton=%s; buttonPosition=%d,%d; delay=%ums; include=%llu; exclude=%llu; batch=%s; pending=%llu; requests=%llu; buttonRequests=%llu; coalesced=%llu; refused=%llu; stale=%llu; empty=%llu; started=%llu; completed=%llu; cancelled=%llu; queued=%llu; transferred=%llu; failed=%llu; skipped=%llu; dispatchFailures=%llu; TOML=%s.",
         Settings.enabled ? "true" : "false",
         DepositAction.load(std::memory_order_acquire)
                 != D2RL::Input::InvalidHandle
@@ -1668,7 +1751,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
                 "BulkCurrencyDeposit: optional status command was not registered.");
         }
         context->LogInfo(
-            "Bulk Currency Deposit 1.1.2 by RuffnecKk loaded disabled; no Controls action, SDK listeners or resources installed.");
+            "Bulk Currency Deposit 1.1.3 by RuffnecKk loaded disabled; no Controls action, SDK listeners or resources installed.");
         return true;
     }
 
@@ -1744,7 +1827,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         message,
         sizeof(message),
-        "Bulk Currency Deposit 1.1.2 by RuffnecKk active; native fingerprint accepted; Controls action=Bulk Currency Deposit (default SHIFT+D); buttonResources=ready; inventoryButton=%s at %d,%d; delay=%ums; routing=native Advanced Stash registry; installation=%s; TOML=%s.",
+        "Bulk Currency Deposit 1.1.3 by RuffnecKk active; native fingerprint accepted; Controls action=Bulk Currency Deposit (default SHIFT+D); buttonResources=ready; inventoryButton=%s at %d,%d; delay=%ums; routing=native Advanced Stash registry; installation=%s; TOML=%s.",
         Settings.inventoryButtonEnabled ? "injected" : "external-ready",
         Settings.button.x,
         Settings.button.y,

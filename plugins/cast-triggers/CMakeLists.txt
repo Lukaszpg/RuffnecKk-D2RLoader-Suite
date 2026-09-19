@@ -1,6 +1,6 @@
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.28)
-    project(RuffnecKkCastTriggers VERSION 1.1.0 LANGUAGES CXX RC)
+    project(RuffnecKkCastTriggers VERSION 1.1.1 LANGUAGES CXX RC)
     include(CTest)
     option(RUFFNECKK_SUITE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
@@ -10,6 +10,8 @@ else()
 endif()
 
 include(FetchContent)
+option(RUFFNECKK_CAST_TRIGGERS_DAMAGE_CLEANUP_V1
+    "Build the isolated 1.0.2 damage-cleanup candidate (not release eligible)" OFF)
 if(NOT TARGET tomlplusplus::tomlplusplus)
     set(TOMLPLUSPLUS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(TOMLPLUSPLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -34,6 +36,12 @@ set_target_properties(ruffneckk_cast_triggers PROPERTIES
     PREFIX ""
     RUFFNECKK_PUBLIC_ARCHIVE_ELIGIBLE TRUE
 )
+if(RUFFNECKK_CAST_TRIGGERS_DAMAGE_CLEANUP_V1)
+    target_compile_definitions(ruffneckk_cast_triggers PRIVATE
+        RUFFNECKK_DAMAGE_CLEANUP_V1=1)
+    set_target_properties(ruffneckk_cast_triggers PROPERTIES
+        RUFFNECKK_PUBLIC_ARCHIVE_ELIGIBLE FALSE)
+endif()
 d2rlplugin_embed_config(
     TARGET ruffneckk_cast_triggers
     FILE "${CMAKE_CURRENT_SOURCE_DIR}/config/ruffneckk-cast-triggers.toml"
@@ -47,6 +55,19 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(ruffneckk_damage_cleanup_tests src/damage_cleanup_tests.cpp)
+    target_compile_features(ruffneckk_damage_cleanup_tests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(ruffneckk_damage_cleanup_tests PRIVATE /utf-8 /W4 /WX /EHsc)
+    endif()
+    add_test(NAME ruffneckk.cast-triggers.damage-cleanup
+        COMMAND ruffneckk_damage_cleanup_tests)
+    set_tests_properties(ruffneckk.cast-triggers.damage-cleanup PROPERTIES TIMEOUT 20)
+    if(RUFFNECKK_CAST_TRIGGERS_DAMAGE_CLEANUP_V1)
+        add_test(NAME ruffneckk.cast-triggers.damage-cleanup-binary
+            COMMAND ruffneckk_damage_cleanup_tests $<TARGET_FILE:ruffneckk_cast_triggers>)
+        set_tests_properties(ruffneckk.cast-triggers.damage-cleanup-binary PROPERTIES TIMEOUT 20)
+    endif()
     add_executable(ruffneckk_cast_triggers_tests src/policy_tests.cpp)
     target_compile_features(ruffneckk_cast_triggers_tests PRIVATE cxx_std_20)
     target_link_libraries(ruffneckk_cast_triggers_tests PRIVATE tomlplusplus::tomlplusplus)

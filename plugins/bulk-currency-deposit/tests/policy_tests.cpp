@@ -270,33 +270,71 @@ tooltip = 'Deposit "Currency" \ Now'
     rundown.Leave();
     REQUIRE(rundown.ActiveCount() == 0);
 
-    REQUIRE(AcceptUiStateEntry(
-        UiStateEntryStatus::Unchanged, true, false, 0, {}));
-    REQUIRE(!AcceptUiStateEntry(
-        UiStateEntryStatus::Unchanged, false, true, 1,
-        "ruffneckk-remote-stash"));
-    REQUIRE(AcceptUiStateEntry(
-        UiStateEntryStatus::TrackedInlineHook, false, true, 1,
-        "ruffneckk-remote-stash"));
-    REQUIRE(!AcceptUiStateEntry(
-        UiStateEntryStatus::TrackedInlineHook, false, false, 1,
-        "ruffneckk-remote-stash"));
-    REQUIRE(!AcceptUiStateEntry(
-        UiStateEntryStatus::TrackedInlineHook, false, true, 2,
-        "ruffneckk-remote-stash"));
-    REQUIRE(!AcceptUiStateEntry(
-        UiStateEntryStatus::TrackedInlineHook, false, true, 1,
-        "another-plugin"));
-    REQUIRE(!AcceptUiStateEntry(
-        UiStateEntryStatus::Other, true, true, 1,
-        "ruffneckk-remote-stash"));
+    using RuffnecKk::TrackedNativeTransform::Admission;
+    using RuffnecKk::TrackedNativeTransform::Kind;
+    using RuffnecKk::TrackedNativeTransform::Observation;
+    using RuffnecKk::TrackedNativeTransform::State;
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Unchanged, Kind::Unknown, 0, {}, true, true}, true)
+        == Admission::Pristine);
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Unchanged, Kind::Unknown, 1,
+            "ruffneckk-remote-stash", true, true}, false)
+        == Admission::Rejected);
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "ruffneckk-remote-stash", true, true}, false)
+        == Admission::TrackedCompatible);
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "ruffneckk-remote-stash", false, true}, false)
+        == Admission::Rejected);
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Tracked, Kind::InlineHook, 2,
+            "ruffneckk-remote-stash", true, true}, false)
+        == Admission::Rejected);
+    REQUIRE(EvaluateUiStateEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "another-plugin", true, true}, false)
+        == Admission::Rejected);
+
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Unchanged, Kind::Unknown, 0, {}, true, true}, true, true)
+        == Admission::Pristine);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "celestialrayone.whirlwind", true, true}, false, true)
+        == Admission::TrackedCompatible);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Untracked, Kind::Unknown, 0, {}, true, true}, false, true)
+        == Admission::Rejected);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "another-plugin", true, true}, false, true)
+        == Admission::Rejected);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::InlineHook, 2,
+            "celestialrayone.whirlwind", true, true}, false, true)
+        == Admission::Rejected);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::BytePatch, 1,
+            "celestialrayone.whirlwind", true, true}, false, true)
+        == Admission::Rejected);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "celestialrayone.whirlwind", false, true}, false, true)
+        == Admission::Rejected);
+    REQUIRE(EvaluateItemInteractionBlockedEntry(
+        {State::Tracked, Kind::InlineHook, 1,
+            "celestialrayone.whirlwind", true, true}, false, false)
+        == Admission::Rejected);
 
     const auto source = ReadTextFile(BULK_CURRENCY_DEPOSIT_SOURCE_FILE);
     REQUIRE(source.find(".logicalId = \"bulk-currency-deposit\"")
         != std::string::npos);
     REQUIRE(source.find(".displayName = \"Bulk Currency Deposit\"")
         != std::string::npos);
-    REQUIRE(source.find(".version = \"1.1.2\"") != std::string::npos);
+    REQUIRE(source.find(".version = \"1.1.3\"") != std::string::npos);
     REQUIRE(source.find(".category = \"RuffnecKk Suite\"")
         != std::string::npos);
     REQUIRE(source.find("D2RL::Input::Key::D") != std::string::npos);

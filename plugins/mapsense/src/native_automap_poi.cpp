@@ -1,7 +1,9 @@
 #include "native_automap_poi.hpp"
+#include "tracked_native_transform_compat.hpp"
 #include "native_object_interact_contract.hpp"
 
 #include "mapsense_data_catalog.hpp"
+#include "navigation_resolver.hpp"
 #include "reveal_engine.hpp"
 
 #include <D2RLPlugin/api.h>
@@ -682,6 +684,8 @@ void ProjectExitLabelsLocked(
         || layers == nullptr) {
         return;
     }
+    const auto viewportScale = ResolveNativeAutomapViewportScale(
+        pass.nativeWidth, pass.nativeHeight, pass.clipWidth, pass.clipHeight);
     std::array<AutomapExitLabelDefinition, MaximumAutomapExitLabels>
         effectiveDefinitions{};
     std::size_t effectiveDefinitionCount{};
@@ -809,6 +813,7 @@ void ProjectExitLabelsLocked(
             .y = projected.y,
             .nativeWidth = pass.nativeWidth,
             .nativeHeight = pass.nativeHeight,
+            .nativeViewportScale = viewportScale,
             .sourceId = labelLevelId,
             .kind = AutomapPoiKind::ExitLabel,
         };
@@ -824,8 +829,11 @@ void ProjectWaypointLabelsLocked(
         || layers == nullptr) {
         return;
     }
+    const auto viewportScale = ResolveNativeAutomapViewportScale(
+        pass.nativeWidth, pass.nativeHeight, pass.clipWidth, pass.clipHeight);
     for (const auto& definition : WaypointDefinitions.Definitions()) {
         if (count >= ProjectedSnapshots.size()) return;
+        if (!Detail::AllowsWaypointLabelForLevel(definition.levelId)) continue;
         if (!NativeAutomapLevelsShareLayer(
                 *layers,
                 pass.currentLevelId,
@@ -854,6 +862,7 @@ void ProjectWaypointLabelsLocked(
             .y = projected.y,
             .nativeWidth = pass.nativeWidth,
             .nativeHeight = pass.nativeHeight,
+            .nativeViewportScale = viewportScale,
             .sourceId = definition.levelId,
             .kind = AutomapPoiKind::WaypointLabel,
         };
@@ -1307,9 +1316,8 @@ void ProjectSpecialChestPresetsLocked(
             activeRoomGetDrlgRoomExpected)
         && check(GetDrlgRoomLevelIdRva, drlgRoomLevelIdExpected)
         && check(GetUnitByIdAndTypeRva, clientUnitHashTableExpected)
-        && check(
-            ClientUnitHashLookupWitnessRva,
-            clientUnitHashLookupExpected);
+        && Detail::ValidateClientUnitHashLookup(
+            context, clientUnitHashLookupExpected, true);
 }
 
 void ResetCounters() noexcept {

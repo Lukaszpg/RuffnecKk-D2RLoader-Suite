@@ -1,4 +1,4 @@
-# Cast Triggers 1.1.0
+# Cast Triggers 1.1.1
 
 Cast Triggers adds Path of Exile-style skill procs to Diablo II: Resurrected
 items.
@@ -260,3 +260,9 @@ The source skill and triggered skill are separate. In a property named
 - Author: `RuffnecKk`.
 - D2MOO is the semantic reference for item properties and server skill behavior.
 - D2RLoader and its PluginSDK provide the plugin runtime.
+
+## Isolated compatibility work
+
+The optional 1.0.1 damage-cleanup candidate for DollExplosion is documented in
+[DAMAGE-CLEANUP-ABI.md](DAMAGE-CLEANUP-ABI.md). It is OFF by default and excluded
+from the current release; the default plugin remains 1.0.0.

@@ -1,6 +1,6 @@
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.28)
-    project(RuffnecKkMapSense VERSION 2.0.0 LANGUAGES C CXX RC)
+    project(RuffnecKkMapSense VERSION 2.0.1 LANGUAGES C CXX RC)
     include(CTest)
     option(RUFFNECKK_SUITE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
@@ -140,6 +140,30 @@ if(MSVC)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(ruffneckk_mapsense_tracked_native_transform_tests
+        src/tracked_native_transform_compat_tests.cpp)
+    target_compile_features(ruffneckk_mapsense_tracked_native_transform_tests PRIVATE cxx_std_20)
+    target_link_libraries(ruffneckk_mapsense_tracked_native_transform_tests PRIVATE
+        RuffnecKk::Common)
+    if(MSVC)
+        target_compile_options(ruffneckk_mapsense_tracked_native_transform_tests PRIVATE
+            /W4 /permissive- /EHsc /utf-8
+            $<$<BOOL:${RUFFNECKK_SUITE_WARNINGS_AS_ERRORS}>:/WX>)
+    endif()
+    add_test(NAME ruffneckk.mapsense.tracked-native-transform
+        COMMAND ruffneckk_mapsense_tracked_native_transform_tests)
+
+    add_executable(ruffneckk_mapsense_renderer_discovery_policy_tests
+        src/d3d12_renderer_discovery_policy_tests.cpp)
+    target_compile_features(ruffneckk_mapsense_renderer_discovery_policy_tests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(ruffneckk_mapsense_renderer_discovery_policy_tests PRIVATE
+            /W4 /permissive- /EHsc /utf-8
+            $<$<BOOL:${RUFFNECKK_SUITE_WARNINGS_AS_ERRORS}>:/WX>)
+    endif()
+    add_test(NAME ruffneckk.mapsense.renderer-discovery-policy
+        COMMAND ruffneckk_mapsense_renderer_discovery_policy_tests)
+
     add_executable(ruffneckk_mapsense_gps_follow_tests
         src/navigation_gps_follow_tests.cpp src/navigation_engine.cpp)
     target_compile_features(ruffneckk_mapsense_gps_follow_tests PRIVATE cxx_std_20)

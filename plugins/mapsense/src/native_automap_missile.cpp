@@ -1,4 +1,5 @@
 #include "native_automap_missile.hpp"
+#include "tracked_native_transform_compat.hpp"
 
 #include <D2RLPlugin/api.h>
 
@@ -610,9 +611,8 @@ void CountDuplicateIdentity(
         && check(
             ServerUnitHashTableWitnessRva,
             serverUnitHashTableExpected)
-        && check(
-            ClientUnitHashLookupWitnessRva,
-            clientUnitHashLookupExpected)
+        && Detail::ValidateClientUnitHashLookup(
+            context, clientUnitHashLookupExpected, true)
         && check(MissileUnitTypeWitnessRva, missileUnitTypeExpected);
 }
 
