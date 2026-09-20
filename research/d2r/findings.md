@@ -3,6 +3,47 @@
 Ce document conserve uniquement les conclusions utiles aux prochaines sessions.
 Les sorties volumineuses demeurent sous `analysis-cache/corpus/`.
 
+## Force Map Reset — décisions natives de reprise du seed
+
+Le getter leaf `0x76010` retourne le bloc d'options `0x2A210A0`.
+L'option interne `resetofflinemaps` est lue à `+0xB24` par trois consumers
+directs : `0x4210BF`, `0x532437`, `0x532B68`. Leurs branches `75 09` à
+`0x4210C6`, `0x53243E`, `0x532B6F` évitent les copies du seed sauvegardé vers
+`Game+0x12C`. Les témoins exacts sont inscrits dans `known-rvas.json` et
+vérifiés directement dans l'image canonique; la borne PDATA `0x532442` coupe
+une instruction et ne représente pas une fin logique.
+
+La propagation native `Game+0x12C -> R8D (0x48AADB) -> 0x2EF1C0 -> EBP ->
+R9D (0x2EF266) -> DRLG allocator 0x326BA0 -> Drlg+0x840` établit le rôle map
+seed. La sélection d'un seed natif fixé garde priorité sur la reprise de save.
+Les alias CLI `-resetmaps` et `-seed` ne sont pas prouvés par ces observations.
+
+Après présentation du mécanisme révisé, Vincent demande de continuer.
+Le candidat `addons/RuffnecKkForceMapReset/` implante les trois opcodes
+`75 -> EB`, déplacement `09` inchangé, au chargement initial. Une transaction
+locale prépare les deux pages, acquiert chaque opcode par CAS et restaure
+conditionnellement ses écritures et les protections en cas d'échec; un état
+irrécupérable interdit la poursuite du processus. L'audit du D2RCore 1.2.1
+prouve que `PatchBytes` peut retourner false après mutation; le candidat
+n'utilise donc pas ce writer et ne suppose aucun rollback implicite Loader.
+L'empreinte inclut aussi les gates en amont à `0x42109E[28]`,
+`0x53241C[22]` et `0x532B4D[22]`, pour couvrir le mode de partie et la
+priorité du seed fixé, en plus des contextes de saut et de la propagation
+vers DRLG. Les témoins sont vérifiés directement contre l'image
+canonique, octets, tailles et SHA-256 compris. Aucun runtime ou contrat
+multijoueur n'est qualifié.
+Voir `plugin-dev/force-map-reset/mission.md`, y compris référence sémantique D2MOO,
+limites de l'inventaire des accès directs et revue Sol/Astra.
+
+Le premier essai Loader 1.2.2 du 8 septembre révèle que le record statique
+`resetofflinemaps` à `0x19CEF18[56]` n'est pas un témoin runtime transportable :
+ce RVA est dans `.data` canonique mais dans `.text` de l'image hôte chargée.
+Les onze témoins effectifs du code concordent. Ce record, jamais lu/écrit par
+la DLL, doit rester une référence sémantique documentaire hors gate. La
+correction 0.1.1 conserve intégralement les onze témoins consommés, dont les
+trois accès exacts à `+0xB24`, et ne transpose pas les adresses de données
+statiques vers l'hôte Loader par un delta supposé.
+
 ## ISC12 — disposition runtime du conteneur persistant
 
 - Le premier write réel du candidat à enveloppe a produit exactement 499
@@ -959,6 +1000,33 @@ La référence sémantique
 explique les champs et le flux historique; aucune adresse, structure ou ABI
 32 bits n'a été transposée.
 
+## Herald additional auras — correction during Bind Demon investigation
+
+On 2026-09-08, the four-record table at `0x1D1DF20` was distinguished from a
+Bind Demon-specific pool. UMod30 tests `MonsterData+0x1A` mask `0x200` through
+`0x38E870` at `0x495F71`, after its ordinary aura assignment. A restoration
+path sets that mask through `0x38E710` at `0x415911` and writes stat 367
+(`heraldtier` in Vanilla 3.3 ItemStatCost) at `0x415926`.
+
+The alternate selection reads 24-byte records and applies `item_aura` stat 151
+at `0x49614B`, with the selected skill id as the uint16 stat layer and the
+calculated level clamped to 1..99. This differs from ordinary aura activation
+through `D2GAME_AssignSkill` at `0x495F64`.
+
+Historical runtime output from 2026-08-12 contains three complete active rows:
+`(0,1,0,1,6,113)`, `(0,1,0,1,6,115)`, `(0,1,0,1,10,428)`. Their skill names are
+Concentration, Vigor and HeraldThorns. The fourth row's captured prefix is
+`(0,0,0)`; its remaining fields are unknown. This historical snapshot is not a
+current runtime test or a complete data fingerprint.
+
+The static witness at `0x415901`, 42 bytes, is
+`83 FB 03 75 25 BA 00 02 00 00 41 B0 01 49 8B CF E8 FA 8D F7 FF 44 8B 44 24 6C 45 33 C9 BA 6F 01 00 00 49 8B CF E8 E5 23 EE FF`.
+It hashes to `727311C0B282AA17FE8894A7CF0E6364A4C2A67FEF29A1E0CBABA8B390F861B1`
+in the verified common analysis image. Full diagnostic windows and historical
+output provenance are cached under `plugin-dev/bind-demon-auras/experiments/bind-demon-auras/native/`.
+See `plugin-dev/bind-demon-auras/mission.md` for the authorization, scope and remaining
+Bind Demon questions. No plugin or patch implements this investigation.
+
 ## Floating Damage — projection native des unités
 
 - `RENDER_ProjectUnitToScreen 0x76A7D0` possède six appels directs sous le
@@ -1873,7 +1941,7 @@ confiance explicite.
   concorde avec la table runtime `0x2386730`.
 - Les sorties normalisées, le manifeste de hashes, le captureur runtime et les
   TSV déterministes sont gouvernés par
-  `Mission/player-sequence-tables-3.3.md`. Cette phase ne prouve pas encore le
+  `plugin-dev/player-sequence-tables/mission.md`. Cette phase ne prouve pas encore le
   contrat de propriété, la durée de vie, le remplacement de longueurs variables
   ni l'autorité multijoueur; ces points bloquent toute implantation.
 
@@ -1936,7 +2004,7 @@ confiance explicite.
   `SKILLS_GetHighestLevelSkillFromUnitAndId` à `0x33DD40`, puis consomme et
   renouvelle `Param1`. L'active callback Hurricane à `0x575600` ne dépend plus
   d'un noeud de skill une fois l'état initial créé.
-- Le mécanisme retenu dans `Mission/armageddon-ctc-fix.md` reste synchrone et
+- Le mécanisme retenu dans `plugin-dev/armageddon-hurricane-ctc-fix/mission.md` reste synchrone et
   borné : `ItemEffect` est restauré après le helper, le used skill synthétique
   est stack-local pendant SrvDo124, et le noeud Armageddon synthétique est lié
   seulement pendant chaque active callback. Aucun noeud fabriqué n'est
@@ -3283,7 +3351,7 @@ confiance explicite.
   reproduit `Levels.txt → Act` est `row+0x0D`. Une entrée en partie BKVince a
   ensuite observé `dataContext=3`, égal à la valeur ABI `Bank::Rotw=3`.
   Preuve locale :
-  `analysis-cache/extended-act-level-ids-probe/evidence/20260901-1918/ruffneckk-extended-act-level-ids-probe.log`
+  `plugin-dev/extended-act-level-ids/experiments/extended-act-level-ids-probe/evidence/20260901-1918/ruffneckk-extended-act-level-ids-probe.log`
   (SHA-256 `F81B7F76F28D36CC173D7D7A8CB83888D9D026BAF0C5C5B801B40B8B5FC6BA6D`).
 - D2MOO 1.10f explique pourquoi cette surface existe :
   `DRLG_GetActNoFromLevelId` applique les seuils fixes
@@ -3305,7 +3373,7 @@ confiance explicite.
   retrouve byte-exact le SHA-256
   `A46B5438164ADB1FB9540890103594EA48A79AFA2478CB6865D2E6DB5795EB04`.
   Preuve locale :
-  `analysis-cache/extended-act-level-ids-product/evidence/20260901-1947-functional-fixture/ruffneckk-extended-act-level-ids.fixture.log`.
+  `plugin-dev/extended-act-level-ids/experiments/extended-act-level-ids-product/evidence/20260901-1947-functional-fixture/ruffneckk-extended-act-level-ids.fixture.log`.
 
 ## 2026-09-04 — Extended Act Level IDs 2.0.0 : limite 1023 et codec de visibilité
 
@@ -3402,7 +3470,7 @@ confiance explicite.
   paquet d'état `0x60`, host/joiner et refus Battle.net/incompatible.
 - Les tables, la DLL et les neuf fichiers `QtyTester` ont été restaurés
   byte-exact; aucun processus ne demeure. Le rapport local complet est sous
-  `analysis-cache/extended-act-level-ids-v2/runtime/20260904-gameplay-level-256-return-portal-2.0.2/`.
+  `plugin-dev/extended-act-level-ids/experiments/extended-act-level-ids-v2/runtime/20260904-gameplay-level-256-return-portal-2.0.2/`.
 
 ## 2026-09-04 — Extended Act Level IDs : census Town Portal 1023
 
@@ -3610,7 +3678,7 @@ confiance explicite.
 - Ce gate runtime est **FAIL** et n'autorise aucune correction. La DLL 2.1.0,
   les fixtures et les sauvegardes ont été restaurées; aucun processus ne
   demeure. Les preuves locales sont sous
-  `analysis-cache/extended-act-level-ids-v2/runtime/20260904-town-portal-1023-local-offline-2.1.0/`.
+  `plugin-dev/extended-act-level-ids/experiments/extended-act-level-ids-v2/runtime/20260904-town-portal-1023-local-offline-2.1.0/`.
 
 ## 2026-09-04 — Potion Auto Pickup 2.0.0 stacking contract
 
@@ -3946,6 +4014,31 @@ was performed. Baseline 1.2.2 remains a candidate, not an integration claim.
 
 ## 2026-09-05 — Doll Explosion 0.1.0, mort complète et transporteur natif sûr
 
+**Rectification 0.1.2 : les affirmations ci-dessous associant pSrvDo=1 à
+0x455750/0x466B40 et la table à 0x2380E80 sont révoquées.** Le test de 19:17
+et la lecture bornée de PID 38796 trouvent l'entrée 1 à `0x4550E0`, un relais
+`E9 1B E0 00 00` vers `0x463100`. Le LEA à `0x466E4B` calcule
+`0x466E52 + 0x01F2A02E = 0x2390E80`. Le registre est corrigé, pas doublonné.
+Les commentaires historiques restent ci-dessous pour expliciter la provenance
+du défaut; leur ancien verdict PASS STATIQUE ne qualifie pas le délai.
+
+Le source 0.1.2 hooke uniquement le relais de cinq octets et conserve le
+dispatcher, la table et la fonction commune (51 références directes) intacts.
+La décrémentation serveur est à `0x4631BB..0x4631F5`; le résolveur de hit
+`0x4639A0..0x4640E2` renvoie 2 sans libérer l'unité. Le dispatcher ne fait ses
+appels de retrait `0x536EA0`/`0x48FAA0` qu'après le retour, à `0x466E6A` et
+`0x466E75`. Les bornes PDATA du résolveur étant fragmentées, sa décompilation
+automatique initiale était inutilisable : preuve par désassemblage linéaire
+depuis l'entrée réelle, et non depuis `0x463950`.
+
+Le plugin appelle l'original une fois, retire le sidecar sur retour 2, mais
+n'explose que si le compteur observé avant l'appel était 1; un retrait anticipé
+ne raccourcit pas volontairement le délai. La portée reste native statique :
+les callbacks tiers, le trampoline Loader sur ce relais, Bind And Summon et la
+pile toutes fonctionnalités actives demandent encore une session autorisée.
+Les tests décodent les rel32, couvrent 25 paires compteur/retour et comparent
+35 signatures au PE gouverné. Aucun lancement n'est réalisé pour ce correctif.
+
 - La couture initialement candidate à `0x44535F` est rejetée pour les sept
   Dolls classiques : l'entrée de mort `0x444F50` résout le MonStats contextuel
   à `0x44501F`, lit le byte `+0x3E` et saute toute la branche d'explosion à
@@ -4156,10 +4249,118 @@ Le parseur World lit Teleport/Objects embarqués au lieu du contexte mod actif.
 `mapsense-gps-data-audit.mjs` confirme zéro différence Teleport sur les 137
 IDs communs mais dix IDs BKVince supplémentaires hors table embarquée.
 Les entrées sont round-trippées byte-exact en mémoire, sans écriture TSV.
-La mission et `suite:plugins/mapsense/mapgen/GPS-PROOF.md` conservent la matrice,
+La mission et `suite:workspace:plugin-dev/mapsense/notes/GPS-PROOF.md` conservent la matrice,
 ses limites et le prochain lot : adaptation, comparaison au terrain D2R,
 puis intégration. Aucun runtime, déploiement, nouveau paquet réseau ou
 changement de sauvegarde dans ce lot.
+
+## 2026-09-05 — MapSense 1.0.2 r3 : adaptation GPS hors jeu
+
+Le `continue` de Vincent prolonge la preuve vers les primitives existantes.
+Trois témoins uniques supplémentaires du consommateur `0x363F20` sont promus :
+`0x3643A2` choisit l'axe majeur et initialise la déviation à zéro;
+`0x364458` et `0x3645FA` testent la cellule avant d'avancer, ajoutent le delta
+mineur, puis avancent l'axe mineur lorsque la déviation atteint le delta majeur.
+Les deux extrémités sont incluses. Les instructions sont vérifiées directement
+dans l'image canonique; D2MOO `D2Collision.cpp` apporte seulement une
+corroboration sémantique. L'audit passe désormais **24 témoins et 19 CALL**.
+Ce résultat ferme l'arithmétique directionnelle sur grille plane, pas le
+parcours des frontières de rooms ni le slot 27 de la table initialisée.
+
+Le profil GPS utilise la croix joueur `.small` sous `0x1C09`, la trace
+`0x804` après ajustement des extrémités pour `Teleport=2`, les caches par
+masque/empreinte et les mêmes buffers Levels/Objects que la génération.
+Les représentants d'arrivée sont revérifiés contre l'occupation; les pads non
+qualifiés sont refusés. World respecte le contrat Objects du générateur
+(`Id` ou `*ID`, remplacement Expansion, `IsDoor`), sans prétendre prouver
+l'identité des lignes natives. Les données TSV restent intactes.
+
+**11/11 tests GPS et 45/45 tests existants passent.** Les deux matrices,
+embarquée et avec les entrées BKVince, produisent chacune 600 routes sans
+erreur, 142 229 visites contrôlées et 2 745 sauts dont 72 conditionnels.
+Les 2 168 écarts de croix et 932 coins du probe ponctuel sont réduits à zéro
+sur ses mêmes 25 niveaux standards. Les mêmes totaux ne prouvent pas les
+routes des niveaux custom; leurs métadonnées et le chargement des buffers
+actifs sont testés séparément.
+
+Le patch gouverné se rejoue sur les 12 fichiers de la source épinglée, après
+normalisation des fins de ligne Git. Le helper régulier rebâti reste identique
+au r3 : `74CC1DACA28E836C53E10FDB43EE7B37883E73F0894A06E14AA2A8287B138A43`.
+Rapport et rollback : `suite:workspace:plugin-dev/mapsense/notes/GPS-PROOF.md`.
+`gpsAdmitted=false` et `d2rRuntimeCompared=false` demeurent explicites : aucune
+capture native fraîche, arrivée réelle, intégration du rendu ou installation
+runtime n'est effectuée par ce lot.
+
+## 2026-09-05 — MapSense r3 : capture collision externe préparée
+
+`scripts/reverse-engineering/mapsense-gps-runtime.py` vérifie 21 témoins exacts
+contre le corpus canonique `CC59119D…914715`. Le getter `0x8B2D0` résout par RIP
+le contexte DWORD `0x2A23704`; le getter `0x9A480` (165 octets) borne le contexte
+à huit et indexe les IDs DWORD à `0x2A238F0`, avec `0xFFFFFFFF` absent, avant la
+table client `0x2A23910`. Les deux globals sont inscrits dans known-rvas avec
+preuve et confiance haute. La recherche `0x9F270` (41 octets) confirme type +0,
+ID +8 et hash-next +0x158; les getters/layouts de MapSense qualifient la chaîne
+DynamicPath→ActiveRoom→DrlgRoom→Level→Drlg, grilles et listes de rooms utilisées.
+
+Le lecteur n'utilise que QueryInformation/ReadProcessMemory. Il compare deux
+passes de toutes les plages lues et refuse signatures modifiées, layouts
+incohérents, cycles, budgets dépassés et lectures instables. Ce contrôle n'est
+pas atomique et ne prouve pas une autorité serveur. Aucune DLL ni hook nouveau.
+
+26 tests synthétiques passent, dont une altération indépendante de chacun des
+21 témoins avant toute lecture de global. L'exporteur Suite isolé `gps-export`
+et le comparateur conservent tous les bits et distinguent `0x1C09`, `0x804`
+et voisinage dirigé. Trois exports du générateur (embarqué/BKVince workspace/
+BKVince installé) passent leur exercice **synthétique** de 83 salles,
+132 800 cellules de rooms et 6 889 relations. Helper régulier byte-identique
+au r3 `74CC1DAC…138A43`. Rapport : `workspace:plugin-dev/mapsense/notes/GPS-RUNTIME.md`.
+Le préflight constate le jeu fermé et la baseline Loader 1.2.1 exacte;
+**aucune capture native fraîche ni comparaison D2R, marche ou arrivée de cast**
+n'est encore acquise. Le lancement borné attend la confirmation opérationnelle.
+
+## 2026-09-06 — MapSense r3 : premières comparaisons natives à Harrogath
+
+Pilote runtime explicitement autorisé par Vincent, session BKVince sous D2R
+officiel 3.3.93847 / Loader public 1.2.1, processus de jeu 25656. Les 21 témoins
+du lecteur externe passent dans le processus actif avant toute poursuite de
+pointeur. Deux captures acceptées à 11:03:39 et 11:07:32 UTC lisent seed
+1396293576, difficulté 2, niveau 109, joueur ID 1 en (5098,5023). L'observation
+humaine est « QtyTester dans Harrogath insanity ». Aucun nom de personnage
+n'est déduit des champs mémoire lus par cet outil.
+
+Les 25 rectangles de salles et 625 relations dirigées correspondent exactement
+au générateur exécuté avec ces valeurs et les racines installées. Sur 40 000
+cellules, chaque comparaison conserve 58 différences brutes, dont 13 sous le
+masque joueur 0x1C09 (toutes bloquées seulement côté D2R), zéro sous 0x804.
+Bits XOR : 0x80 × 5, 0x100 × 45, 0x400 × 8, 0x1000 × 5, 0x2000 × 5,
+0x8000 × 5. Le verdict complet reste **DIFFERENCES**.
+
+Entre captures, le joueur reste immobile, mais 20 cellules changent sous 0x100
+et quatre sous 0x1000, en deux groupes en croix déplacés. Le voisinage des
+salles reste identique : une occupation variable est observée. Ce relevé ne
+prouve pas l'identité de tous les occupants ni l'explication de tous les bits.
+Les huit cellules 0x400 restent conservées. La croix initiale du joueur vaut
+0x8080, centre 0x9080; l'origine du bit 0x8000 n'est pas attribuée sans témoin
+supplémentaire. Aucun nettoyage opportuniste ne transforme ce résultat en PASS.
+
+Deux lectures stables par capture, environ 10 ms/178 228 octets lus; aucune
+atomicité globale n'est revendiquée. Les marqueurs de résultat sont désormais
+`d2rRuntimeCompared=true`, `gpsAdmitted=false`, `movementExecutionObserved=false`.
+Harrogath ne qualifie ni trajet hors ville, ni pas moteur, ni cast réel, ni
+autorité serveur multijoueur. Le pilote est ensuite interrompu à 07:42:22 EDT :
+Vincent confirme QtyTester toujours immobile à Harrogath. Le rapport récupéré
+donne D2Prism src/D2Prism.cpp:2112, Present failed 0x887A0005, caller RVA
+0x64BA56; MapSense relève GetDeviceRemovedReason=0x887A0006 et bloque ses
+prochaines soumissions GPU. NVIDIA nvlddmkm 153 précède ces logs de quelques ms.
+Dossier WER Kernel_141 observé, contenu inaccessible; cause GPU non attribuée,
+aucune commande responsable identifiée par la pile CPU d'assertion.
+Exit à 07:53:16, PID 25656 terminé; les trois essais inutilisés ne couvrent
+pas un autre lancement. Le rapport exact, SHA-256
+3283B62A37A4621C2D1DAAD3079B036A5979F995D8187F561DA2FA320DD19413,
+et les logs hashés sont dans le sous-dossier crash-20260906 du pilote.
+Preuves : `plugin-dev/mapsense/testing/runs/mapsense-gps-runtime-20260906T104056Z/` et rapport
+`workspace:plugin-dev/mapsense/notes/GPS-RUNTIME.md`. Aucun nouveau hook, accès en
+écriture, déploiement de DLL/configuration, commit ou push par ce pilote.
 
 ## 2026-09-05 — Potion Stacking : décision de retrait avant batch et vrai résultat d'effet
 
@@ -4303,3 +4504,1835 @@ SHA-256 du build local final :
 `FDF4E3D819A4CD0090A5E6D7D6ABF5E63B3855E8F2E353E80E35407A7C55448D`.
 La DLL installée reste inchangée :
 `E046FE727F64F6BB204CA0ECB470829DA0C18EC5FABAEAEB1CD70043754E6AE2`.
+
+## 2026-09-05 — Potion Stacking : plafond Loader hors belt et capacité de fusion ciblée
+
+Continuation source-only dans `suite:plugins/potion-auto-pickup`. Le status de
+l'atelier confirme les mêmes images canonique/analyse gouvernées et le même
+index persistant; aucune réimportation. Baseline promue Loader 1.2.1, SDK API 3
+`4933e2c42cb2592958cd0df3b6dc5003102252d1`; l'annonce candidate 1.2.2 ne change
+pas cette autorité. Références D2RL-Plugins et D2MOO propres aux pins respectifs
+`dc75b49ffbb67b887d7757ee00ee9a03bcde5d8a` et
+`19019806df7f3e877fa105b05395d1e3597e2316`.
+
+### Limites implantées et limites de portée
+
+`ReadStorageMaximum` utilise le DWORD effectif Core déjà résolu et empreinté
+par le lot précédent. Seules les valeurs 1..511 sont représentables par la
+quantité ordinaire; absence, zéro ou dépassement refuse le stacking avant les
+hooks. Aucun clamp à 511 ou défaut arbitraire 255. Les cinq champs compilés
+restent restaurables sous contrôle de propriété; `maxstack` reçoit désormais
+ce plafond de stockage dans les deux banques, pour les 12 codes gérés.
+`max_stack = 1` n'exclut plus la famille du stacking : ce réglage limite la belt,
+pas inventory/Cube/stash. Les tables TXT et les TOML installés sont inchangés.
+
+Le call `0x47558E`, dans `0x4754C0`, a pour argument **la destination** :
+`0x475588` copie RBX vers RCX, `0x47558B` conserve l'ancienne quantité en R14D,
+puis le résultat maximum devient R13D. Les quantités/capacités négatives et
+l'overflow signé sont refusés avant le transfert. La suite calcule
+`min(source + destination, maximum) - destination`, puis utilise le chemin
+natif de débit/crédit/synchronisation. Une limite inférieure à une quantité
+déjà stockée produirait donc un mouvement inverse sans garde supplémentaire.
+
+L'adapter remplace **uniquement** ces cinq octets de CALL. Pour une potion
+ordinaire gérée, il retourne le cap familial seulement si la destination est
+l'item belt sélectionné par le scope TLS AutoPickup; sinon, le plafond Loader.
+Une destination au-dessus du cap est gelée en retournant sa quantité actuelle.
+Un compteur ambigu ou Advanced Stash DWORD non nul retourne -1; un item non
+géré délègue au getter natif inchangé. Ce n'est pas un hook global de
+`ITEMS_GetTotalMaxStack` : ses 39 callers ne sont pas tous des transferts belt.
+
+La pose native sur une case vide déplace l'objet entier. Une garde
+`FitsWholePickup` exige donc que la source tienne entièrement dans la
+destination AutoPickup choisie. Une pile 255 ne peut pas être déposée dans
+une case 0/5 par ce routeur; une source 3 ne passe pas dans 3/5. Le routeur
+laisse ces piles au sol, sans sauter la case partielle ni anticiper l'overflow.
+Une bouteille unitaire passe encore dans chaque emplacement disponible.
+Une destination de fusion occupée n'est plus offerte comme case libre.
+**Cette garde provisoire ne réalise pas le split et ne borne pas les
+déplacements manuels.** La classification reste limitée aux 12 codes existants.
+
+### ABI, empreinte et tests
+
+Le relais de fusion est un leaf de 14 octets `FF 25 00 00 00 00` suivi de
+l'adresse u64 de l'adapter. Il est placé à +32 dans la même allocation de
+46 octets que le relais d'effet de 19 octets à +0, proche des deux calls.
+Une seule transition RW vers RX précède publication; les écritures natives
+passent par la transaction SDK. Le relais ne modifie ni registre d'argument
+ni RSP. La page publiée garde sa durée de vie processus.
+
+Trois tableaux extraits du source ont été revérifiés byte-exact et uniques
+contre l'image d'analyse gouvernée : entrée getter `0x3719E0` / 32 octets,
+lecture maxstack/stat 254/cap 511 `0x371A6A` / 45 octets, contexte du call
+`0x475588` / 48 octets. Aucune signature seulement supposée n'est branchée.
+
+Build MSVC Release DLL/tests PASS; CTest ciblé **2/2 PASS** (Potion et politique
+source Suite). Les 1 572 864 couples vérifient aussi la garde whole-pickup et
+l'équivalence du transfert avec l'arithmétique native à plafond gelé. Les tests
+couvrent plafond Loader invalide, belt cap 1, sur-cap et quantités ambiguës.
+Le harness Windows x64 exécute les deux formes de relais localement : arguments
+et AL/R14 de l'effet, argument unique et retour -1/1/5/255/511 du tail jump.
+Il ne charge pas D2R et ne remplace pas un test gameplay.
+
+Le manifeste contient 28 plages Potion; **4 984 comparaisons ciblées, zéro
+chevauchement déclaré**. Le contrôle global `Test-NativeWrites.ps1` échoue
+encore avant son audit sur l'entrée manquante Shadow Master AI; ce lot étranger
+n'est pas modifié et aucune coexistence complète n'est revendiquée.
+
+### Pistes de split non branchées
+
+La séquence moderne `0x2C83AB` refuse le cas widget+0x630 == 2 avant son calcul
+de quantité/capacité `0x2C83FA`; le merge UI ne peut donc pas être supposé
+compatible belt. Le chemin serveur `0x4C1950` lit quantités source/destination
+à `0x4C1BF3`/`0x4C1C06` puis capacité destination à `0x4C1C12`, mais son contrat
+complet de requête et de batch client/serveur reste à fermer.
+
+Le corps continu `0x43D660..0x43D8FA` fournit une piste de duplication via
+sérialisation sur buffer 0x400 (`0x43D6D5`), décodage (`0x43D6FA`), création
+(`0x43D731 -> 0x43D900`), traitement des sockets et programmation de régénération.
+D2MOO `ITEMS_Duplicate`, `Items.cpp:1968`, corrobore cette sémantique seulement.
+Le corps moderne utilise game/item, mais aucun caller vers son entrée n'est
+trouvé dans l'index; ni ABI publique ni contrat de split/rollback n'est promu.
+La fonction ancienne et ses paquets 32 bits ne sont pas transposés. Aucun call
+ni hook de duplication n'est ajouté au plugin.
+
+DLL locale finale, non déployée :
+`B4D807ECA2AA91B26C1BC691FD74D2518D8200979A073C4CF1F1CC3459F26456`.
+Pas de lancement, accès à une save, synchronisation runtime, archive, commit
+ou push. Compteur natif, split/placement manuel, conversion Advanced Stash,
+potions du mod actif et save/reload restent ouverts. Ce lot ne constitue
+**toujours pas un candidat gameplay testable**.
+
+## 2026-09-05 — Potion Stacking : compteur natif inventory/belt et oracle du preset
+
+`go` poursuit la refonte source-only, sans élargir aux déploiements ni à une
+release. Checkpoint repris après publication Suite 1.3.3 : les sources Potion
+2.0.0 sont toujours le lot séparé sous `suite:plugins/potion-auto-pickup`.
+Atelier commun ready, images canonique/analyse et index vérifiés; baseline
+promue Loader 1.2.1, SDK API 3 `4933e2c42cb2592958cd0df3b6dc5003102252d1`.
+Candidate Loader 1.2.2 non promue. Référence PluginPack propre au pin
+`dc75b49ffbb67b887d7757ee00ee9a03bcde5d8a`; aucune DLL tierce modifiée.
+
+### Seam UI, rectangles et vrai contenu belt
+
+`0x2A72D0..0x2A73B0` est le renderer par item, ABI `void(widget,item)`.
+Il traite null, demande les dimensions à `0x371850`, résout position/grille
+via les virtuelles widget `+0xC0` et `+0xF8`, puis appelle le renderer central
+`0x15BB80` à `0x2A739B`. Sept callers directs incluent inventory, slot moderne,
+curseur et stash. Le nouveau hook SDK de cinq octets appelle l'original avant
+d'ajouter le compteur. Il ne prend pas l'entrée centrale possédée historiquement
+par le rendu CharmZone et ne remplace pas les widgets natifs.
+
+Le caller belt `0x2266B0` cherche l'item du slot par `0x388390`; non-null mène
+à `0x2267F3`, puis le vrai item est dessiné à `0x22692B`. La branche null
+utilise éventuellement une suggestion manette et appelle directement
+`0x15BB80` à `0x2267E9`; elle n'est pas interceptée, donc pas de chiffre ajouté
+à cette indication de case vide.
+
+`UI_GetItemIconScreenRect 0x2A7A50..0x2A7ACA` reproduit les dimensions et
+virtuelles du dessin : ABI `(widget, RectI* output, item) -> output`.
+`RectI` contient x/y/width/height int32, confirmé aussi par le highlight belt
+`0x2268F8..0x226920` qui utilise les quatre champs du même contrat `+0xF8`.
+Il ne s'agit pas du rectangle du panneau inventory entier. Le helper existant
+`UI_GetCumulativeWidgetScale 0x1E6750` retourne XMM0 et compose les échelles
+de la chaîne parent; sa preuve existante est enrichie, sans entrée doublonnée.
+
+Le compteur lit uniquement une potion gérée de quantité ordinaire connue,
+y compris une ancienne bouteille compacte prouvée à un. Il n'initialise
+aucune stat pendant le rendu. Quantité inconnue/zéro, payload stash DWORD
+non nul ou widget Advanced Stash (vtable `0x1CF4678`, adresse prouvée par
+constructeur `0x2CE44D`) n'ajoute pas de texte. Le compteur natif dédié reste
+seul propriétaire du stash. Rectangle invalide/overflow ou échelle invalide
+refuse le dessin. Une faute dans le nouveau renderer suspend les compteurs et
+journalise une erreur; les exceptions de l'original ne sont pas interceptées.
+
+### Preset natif et dispatcher texte
+
+Le bloc sans CALL `0x2CF2F6..0x2CF3F9` prépare le style de 0xA0 octets,
+puis le copie à parent `+0x6CC`, soit Counter embarqué `+0xB4`. Taille 24 à
+style `+4`, alignements 2/2 à `+0x28/+0x2C`, flags/couleurs/échelles identiques
+aux instructions natives. Trois MOVDQA RIP prennent les vecteurs de
+`0x1CC9210`, `0x1CC91F0` et `0x1CC91E0` pour les offsets style `+0x10`,
+`+0x90` et `+0x80`. Leurs valeurs ne sont pas inventées depuis la section
+statique nulle : la DLL les lit dans l'image en cours après les témoins de
+construction exacts, leurs relations RIP et les plages mémoire lisibles.
+
+Le constructeur établit le sélecteur font E à `0x2CDE5C`; le copier de style
+`0x86D26E..0x86D302` conserve alors les 160 octets sans sélectionner une autre
+font. Le renderer TextWidget teste les deux derniers int32 `+0x98/+0x9C` à
+`0x86D53D`; lorsqu'ils sont nuls, seul son passage direct à `0x86D6F3` est
+utilisé. Le plugin admet ce preset seulement : une autre valeur refuse le
+stacking avant le premier hook, plutôt que d'omettre un passage supplémentaire.
+
+`UI_DrawTextWithStyleAndScale 0x902E20..0x902EFA` reçoit texte UTF-8 en RCX,
+RectI en RDX, style en R8 et scale en XMM3. Il choisit HD `0x907B70` ou
+layout/draw legacy `0x90DC10/0x90CEA0` avec cleanup natif. La DLL passe les
+chiffres 1..511 dans un buffer local de quatre chars, une copie locale du
+preset et le rectangle/scale de l'item. Pas de widget persistant, de font
+externe, d'attente d'ouverture du stash ni de modification du sélecteur global.
+Il s'agit du preset natif standard : le rendu visuel des thèmes et variantes
+de panneaux reste à qualifier, pas présumé identique par les seuls octets.
+
+### Contrôles reproductibles et limites
+
+Dix tableaux source sont byte-exacts et uniques dans l'image gouvernée :
+
+| Surface | RVA | Octets |
+| --- | --- | ---: |
+| renderer item | `0x2A72D0` | 32 |
+| rectangle item complet | `0x2A7A50` | 123 |
+| échelle complète | `0x1E6750` | 59 |
+| dispatcher texte complet | `0x902E20` | 219 |
+| constructeur de preset | `0x2CF2F6` | 260 |
+| font E du compteur | `0x2CDE5C` | 11 |
+| sélection du passage direct | `0x86D53D` | 17 |
+| arguments texte et état font | `0x86D6AE` | 103 |
+| copie style et font E | `0x86D26E` | 149 |
+| identité widget stash | `0x2CE44D` | 13 |
+
+L'oracle Windows x64 exécute les 260 octets du preset sur une mémoire fictive,
+avec un prologue/épilogue préservant RBX/RBP et trois déplacements RIP relogés
+vers des vecteurs locaux. Aucun CALL du jeu et aucun accès à un item réel.
+Pour 16 jeux de vecteurs différents, les **160 octets** de résultat concordent
+avec `Counter::StashStyle`; seuls le style et le flag natif `parent+0x66A`
+changent dans le widget canari. Tous les textes 1..511, quantités invalides,
+zéros, overflow de rectangle, NaN/infini et échelles invalides sont testés.
+Les deux relais précédents et 1 572 864 transferts restent couverts.
+
+Build Release DLL/tests PASS; CTest ciblé **2/2 PASS**. Manifeste : 29 plages
+Potion, **5 162 comparaisons ciblées, zéro chevauchement déclaré**. L'audit
+global reste en échec sur l'entrée Shadow Master AI manquante, non modifiée.
+Le statut console ajoute compteurs dessinés, géométries refusées et faute du
+renderer. Aucun test visuel ni verdict de compatibilité globale n'en découle.
+
+SHA-256 DLL locale :
+`1334192979F353983301ACB6F8EF947E8306566845B6D9A38D61CBBB7571DFEE`.
+DLL installée revérifiée inchangée :
+`E046FE727F64F6BB204CA0ECB470829DA0C18EC5FABAEAEB1CD70043754E6AE2`.
+Aucun lancement, déploiement, accès à une save, archive, commit ou push dans
+ce lot. Le compteur est intégré **en source**, son placement/actualisation et
+clipping restent à observer. Split/transferts manuels, conversion Advanced
+Stash, découverte des potions du mod actif et save/reload restent ouverts;
+consommation/routage non qualifiés en jeu. Le build demeure non déployable
+comme candidat gameplay complet, distinct de la release Suite 1.3.3.
+
+## 2026-09-05 — Potion Stacking : dépôt Advanced Stash serveur et garde anti-perte
+
+Continuation autorisée, source uniquement. Les trois skills RE/incubation/mission
+sont appliqués; corpus d'analyse et pin PluginPack vérifiés. Loader 1.2.1 reste
+promu; 1.2.2 demeure un candidat annoncé, non utilisé pour modifier la baseline.
+Le D2RCore analysé sur disque est celui du registre promu : SHA-256
+`2130A98D0B879696116A7DDDE5C11AE8C91942B54B8276DB43E02074A715BBC8`.
+Aucun accès à un processus, nouvelle capture mémoire ou ouverture de save.
+
+### Requête et frontière autoritaire
+
+Le handler logique commence à `0x4C4AF0` (le PDATA englobant n'est pas son entrée).
+Il exige 25 octets à `0x4C4B1F`, copie le paquet vers `RBP-0x19`, résout le
+propriétaire demandé et exige son state `0xD1`, l'owner GUID de son inventory
+égal au joueur requérant, puis son enregistrement auxiliaire dans l'inventory
+du joueur. Les champs sont opération DWORD +1, item GUID +5, owner GUID +9,
+puis trois DWORDs +13/+17/+21. Le switch `0x4C4C24..0x4C4C49` associe :
+
+- 0 : dépôt `0x4F92F0`, call `0x4C4E19`;
+- 1 : retrait `0x4FB350`, call `0x4C4DED`;
+- 2 : retraits répétés `0x4F6250`, call `0x4C4DCF`;
+- 3 : consolidation `0x4FA790`, call `0x4C4DAA`.
+
+Le dépôt est borné continûment `0x4F92F0..0x4F9F38`, ABI sept arguments
+`int32(game, player, itemGuid, ownerGuid, uint32, uint32, uint32)`.
+Le seul caller direct indexé est celui de l'opération 0. Les args 5/6/7 sont
+encore opaques pour la garde et sont retransmis sans réinterprétation.
+
+L'existence d'un slot est calculée à `0x4F9878` (`0x46DC50`) et le slot retrouvé
+à `0x4F9887` (`0x46D8F0`). Le cap est consulté via un CALL relayé par le Loader
+à `0x4F9898`. Le chemin plein attache le signal natif `0x14`, retourne zéro et
+ne dépose rien. Après validation native du paquet/état inventory à `0x4F998E`, un slot absent
+est inscrit via `0x46DAE0` à `0x4F9B5D` : la fonction lie la source à l'inventory
+du stash et pose sa page à 4, pas un compteur de quantité ordinaire.
+
+Le crédit passe au call relayé `0x4F9CD3`, arguments `(stashOwner,itemClass)`;
+un slot non nul mène à `0x4F9E9B`. Si le slot existait, l'objet source est retiré
+par `0x43EC10` à `0x4F9EA7`. L'update du slot suit à `0x4F9EED` via `0x535F60`.
+Si le crédit échoue, `0x4F9CF8` tente une repose native avant sortie. Cette
+séquence ne constitue pas une conversion prouvée de stat 70 : autoriser une pile
+multiple sur la base d'un crédit unitaire risquerait de perdre son surplus.
+
+### Loader sur disque : distinguer candidat et chaîne active
+
+Le D2RCore promu possède une routine complète `0x6A7990..0x6A7A45` : elle vérifie
+le state D1, retrouve l'item de classe et son enregistrement, lit le DWORD
+`ItemData+0x9C`, le compare au plafond `Core+0x5A7530`, puis **incrémente de un**
+à `0x6A7A1B/0x6A7A1D`. Elle renvoie le slot ou null. Cette preuve est statique;
+la correspondance avec le relay serveur actif `0x4F9CD3` n'a pas été capturée
+dans cette continuation. Le reader UI précédemment prouvé ne prouve pas ce
+nouveau lien. Aucun hook/call Core, nouveau contrat SDK ou write DWORD ajouté.
+
+Il serait incorrect de modifier simplement le hardcode 99 de la consolidation
+`0x4FAB35`, ou de supposer que le résultat du reader UI est le compte brut.
+La transaction complète doit encore fermer les crédits/débits partiels, le cas
+premier slot, les refus et remboursements, la synchronisation et la persistance.
+
+### Retraits : nouvelles bornes utiles, pas de qualification
+
+`0x4FB350` résout le slot, débite via `0x46DC90` à `0x4FB6B0`, puis crée un item
+par `0x43D530` à `0x4FB843`. Les échecs de création, de classe, de recherche de
+place ou de placement passent à des crédits de remboursement relayés au même
+target que le dépôt (`0x4FB869`, `0x4FB9EF`, `0x4FBC21`, `0x4FBDA3`). Le succès
+envoie d'abord l'update du slot à `0x4FBF85`, puis celui de l'item créé à
+`0x4FBFF5`. Sa quantité ordinaire de création reste à prouver : ne pas l'inférer
+de `spawnstack=1` seul. Le helper natif `0x46DC90..0x46DD27` utilise un byte,
+donc sa présence non patchée dans le corpus ne prouve pas le débit DWORD Loader.
+Le wrapper `0x4F6250` répète les retraits et compte les retours zéro; aucun de
+ces chemins n'est changé par le lot présent.
+
+### Intégration bornée et validation
+
+La garde temporaire ne remplace que les cinq octets du CALL `0x4C4E19`, après
+validation native du propriétaire et avant le dépôt. Elle relit la source par
+`SUNIT_GetServerUnit(game,4,guid)` et ne mute aucun item. Pour les potions gérées,
+seuls quantité 1 ordinaire ou compact legacy quantité 0 et DWORD stash nul
+passent au dépôt original. Multiples, valeurs invalides et tout payload DWORD
+non nul restent en place; retour handled no-op zéro et premier log unique.
+Les items absents ou non gérés conservent les validations/erreurs natives.
+Le compteur console expose les demandes gardées. Le résultat est un garde-fou
+du build incomplet, **pas** l'implantation du dépôt de piles ni un verdict de
+sûreté couvrant les retraits, la consolidation ou tous les transferts manuels.
+
+Les témoins source `StashDepositDispatchExpected` (39),
+`StashDepositEntryExpected` (73), `GetServerUnitExpected` (50) sont byte-exacts
+et uniques dans l'image gouvernée. Le troisième relais leaf FF25 de 14 octets
+occupe +48 dans la page RX existante, 62 octets utilisés au total. Aucun hook
+du dispatcher commun, du getter global ni du Loader. Le test x64 local transmet
+les sept arguments dont trois sur la pile, avec valeurs hautes, et conserve
+quatre retours int32. Les tests purs vérifient 6 168 combinaisons par catégorie
+gérée/non gérée, compteurs 256/65536/FFFFFFFF, limites signed et conservation
+dans le modèle natif de dépôt unitaire; les tests précédents restent verts.
+
+Build Release DLL/tests PASS; CTest Potion/source-policy **2/2 PASS**.
+30 plages Potion, **5 340 comparaisons ciblées sans chevauchement**. Le contrôle
+global est réexécuté, toujours bloqué par l'artefact Shadow Master AI absent du
+manifeste, non modifié. Diff whitespace ciblé PASS. Aucun verdict pile complète.
+
+SHA-256 du build local :
+`B9CE1FF4EBE52671FE77069DBFF38E6B20DB87AB128C6BA0651CF4559E0D1241`.
+DLL installée revérifiée :
+`E046FE727F64F6BB204CA0ECB470829DA0C18EC5FABAEAEB1CD70043754E6AE2`.
+Aucun déploiement, jeu lancé, save modifiée, archive, commit ou push. Mission
+rafraîchie dans son bloc Potion uniquement; ROADMAP laissée intacte. La suite
+logique est la conversion autoritaire et son rollback, sans court-circuiter
+les contrôles natifs; belt splitting/manual, potions custom et save/reload sont
+encore ouverts, ainsi que la qualification visuelle et gameplay déjà listée.
+
+## 2026-09-05 — Potion Stacking : relais Loader actifs, diagnostic au menu
+
+### Périmètre et provenance
+
+Vincent répond « Oui, diagnostic au menu » à la séquence bornée : un démarrage
+BKVince sans déployer la nouvelle DLL, lecture des relais, puis fermeture,
+sans charger de personnage ni modifier plugins/configurations. Le skill
+runtime-validation est appliqué, avec RE/incubation/mission. Une instance
+préalablement observée sous un autre profil s'était terminée d'elle-même;
+aucun arrêt de cette instance n'a été demandé par l'agent.
+
+Le démarrage autorisé utilise `-mod BKVince -txt -offline`, bootstrap PID 13076
+à `2026-09-06T01:14:45.635Z`, puis hôte PID 33768 créé à 21:14:47.381 EDT.
+Le jeu est hébergé dans **D2RLoader.exe**, pas dans un processus D2R.exe séparé.
+Base native `0x140000000`, Core `0xC0DE5000000`. Les adresses absolues ci-dessous
+décrivent uniquement cette session, jamais une signature réutilisable en dur.
+
+Provenance installée, relevée avant lancement :
+
+| Artefact | SHA-256 |
+| --- | --- |
+| `.build.info`, version 3.3.93847, Build Key `623f7a1f73eabb08ccb2b2046e3f9164` | `2EBCAD0521DBF038D5A7FE5395E96B4BEF6D4F0774F7B1F840E03C3DE9CB067A` |
+| `D2R.exe` | `E1F5436E3D9687F644EF16938B1B183D1FDEF434F18CF66D852CF68F48CC8936` |
+| `D2RLoader.exe` | `27A79CCD61360CC03E7C623D20A46546E5732B9997C41DC185B5EFC335B5C084` |
+| `D2RCore.dll` | `2130A98D0B879696116A7DDDE5C11AE8C91942B54B8276DB43E02074A715BBC8` |
+| `d2rloader.mpq` | `47BDAFFD1B2633C341640B8B823F782625467433DFBE3C5827DFAD44C381F997` |
+
+Ces artefacts concordent avec la provenance Battle.net gouvernée et le Loader
+1.2.1 promu. Le candidat annoncé 1.2.2 n'est ni installé ni qualifié par ce lot.
+Corpus canonique `CC59119D…914715` et image d'analyse `673E8C0B…0E63AB` vérifiés;
+aucun dump ou nouvel index. Pin PluginPack inchangé `dc75b49f…e5d8a`.
+
+### Lectures de code uniquement
+
+`OpenProcess(0x410)` donne QUERY_INFORMATION/VM_READ, sans droit d'écriture.
+Les lectures sont bornées aux callsites, relais, pointeurs d'import, routines
+et plafond; deux passages donnent les mêmes résultats. Aucun pointeur d'item,
+état joueur ni contenu de save n'est inspecté. Les handles sont fermés.
+
+| CALL du jeu | Octets actifs | Destination observée |
+| --- | --- | --- |
+| `0x2CE509` reader UI | `E8 8E BE B5 03` | relais `0x143E2A39C`, slot `0x143E29B38`, Core `+0x3146F0` |
+| `0x4F9898` cap dépôt | `E8 F9 0A 93 03` | relais `0x143E2A396`, slot `0x143E29B30`, Core `+0x314680` |
+| `0x4F9CD3` crédit dépôt | `E8 0E 0B 93 03` | relais `0x143E2A7E6`, slot `0x143E2A0F0`, Core `+0x6A7990` |
+| `0x4FB869` remboursement | `E8 78 EF 92 03` | même relais de crédit Core `+0x6A7990` |
+| `0x4FB9EF` remboursement | `E8 F2 ED 92 03` | même relais de crédit Core `+0x6A7990` |
+| `0x4FBC21` remboursement | `E8 C0 EB 92 03` | même relais de crédit Core `+0x6A7990` |
+| `0x4FBDA3` remboursement | `E8 3E EA 92 03` | même relais de crédit Core `+0x6A7990` |
+| `0x4FB6B0` débit retrait | `E8 DB 25 F7 FF` | direct jeu `+0x46DC90` |
+| `0x4F62AB` compte retrait répété | `E8 F0 76 F7 FF` | direct jeu `+0x46D9A0` |
+| `0x4C4E19` dispatch dépôt | `E8 D2 44 03 00` | direct jeu `+0x4F92F0` |
+
+Les corps Core complets sont byte-exacts à l'artefact disque hashé :
+
+| Intervalle RVA Core, fin exclusive | Taille | SHA-256 des octets |
+| --- | ---: | --- |
+| `[0x314680,0x3146C6)` | 70 | `17330f26ccab2e3fee1b763d6e5a7acb2845442f60a53c39532dcb6836ed560d` |
+| `[0x3146F0,0x314749)` | 89 | `341aaa5e3b5fb6b75fc75667b52f6ccf74c846dde1e45297a7d599d8bb3c8824` |
+| `[0x6A7990,0x6A7A45)` | 181 | `916d7d02530d73e0fcd45f5fe0e3f073d180c6740a1265a2a1358640789f2fb0` |
+
+Imports Core observés vers le jeu : `+0x5A8970 -> 0x3351B0` (state),
+`+0x5A7FB0 -> 0x46D8F0` (slot par classe), `+0x5A8E30 -> 0x349860`
+(classe), `+0x5A8EF0 -> 0x34A0E0` (contexte), `+0x5AA7E0 -> 0x314110`
+(record Items), `+0x5A8E00 -> 0x34A500` (ItemData),
+`+0x5A6B20 -> 0x075FF0` (assertion). Le DWORD `Core+0x5A7530` vaut **255**.
+Cette preuve ferme l'identité des cibles serveur laissée ouverte au lot
+précédent. Elle ne remplace pas une transaction de conversion prouvée.
+
+### Retrait : le byte est encore actif
+
+Le corps complet `[0x46DC90,0x46DD27)`, 151 octets, est byte-exact au corpus,
+SHA-256 `639d4dd63a2f6bac27e8e5873d4022670e1509db804bbc2280550f6ac9c5af35`.
+Après state D1, résolution de classe et contrôle Items `+0x1BD`, il exécute
+`MOVZX ECX,byte [RAX+0x9C]` à `0x46DCF9`, teste CL puis `DEC CL` à
+`0x46DD04` et `MOV byte [RAX+0x9C],CL` à `0x46DD06`. Zéro renvoie null;
+sinon il renvoie le slot. Aucun emprunt n'atteint les octets supérieurs.
+
+La lecture `[0x46D9A0,0x46D9B5)`, 21 octets, reste également canonique,
+SHA-256 `b983bd7c59a40e1fe8af58e66935f55912118b655136fa1f4e09de376c430a9c`.
+Le call direct actif `0x4F62AB` l'emploie encore pour les retraits répétés.
+Les témoins de dispatch `[0x4C4DF7,0x4C4E1E)` et d'entrée dépôt
+`[0x4F92F0,0x4F9339)` sont eux aussi byte-exacts au corpus.
+
+**Fait :** l'affichage/cap/crédit DWORD et le débit/compte retrait byte
+coexistent dans cette installation. **Conséquence statique :** un compteur
+DWORD 256 donne un byte zéro et le débit étudié retourne null; 257 peut devenir
+256 mais ne franchit pas cette frontière. Aucun essai à ces quantités n'a été
+fait sur un vrai item. Aucun verdict général sur tous les gestes du stash ou
+sur une autre release Loader n'en découle. Avec le plafond observé 255, cette
+frontière n'est pas atteinte; cela ne qualifie pas les autres aspects du plugin.
+
+Ne pas transformer cette découverte en clamp silencieux du TOML, en correctif
+global du Loader, en nouveau service ni en autorisation de hook. L'objectif
+reste plafond familial belt seulement, plafond ordinaire issu du Loader.
+Le support des compteurs Advanced Stash élargis requiert une preuve de retrait
+complète avant implantation/qualification; il n'est pas acquis par le reader.
+La création ordinaire au retrait passe à `0x43D530` puis `0x43CD50`; sa quantité
+unitaire reste à fermer dans l'initialisation de stat 70, pas à déduire de
+`spawnstack=1` seul. Conversion multi-bouteilles et rollback restent ouverts.
+
+### Fin du diagnostic et statut du produit
+
+Log frais `d2rloader/logs/d2rloader.log` : 21:14:52.284, **38 plugins chargés,
+1 doublon global ignoré, 1 échec, 17 patches**; 21:14:57.227, startup complet
+24/24. L'erreur est `Doll Explosion [mod] — Plugin could not be loaded` à
+21:14:47.885. Installation conservée, aucune isolation; cause non étudiée et
+aucun succès de compatibilité globale revendiqué.
+
+`CloseMainWindow()` du seul PID 33768 retourne vrai; sa terminaison est vérifiée.
+Aucun personnage chargé. Aucune DLL/configuration déployée, mais le démarrage
+`-txt` génère normalement logs et tables compilées dans le profil installé.
+DLL locale toujours `B9CE1FF4…0D1241`, installée toujours `E046FE72…54E6AE2`,
+hashes complets revérifiés. La nouvelle garde source n'était donc pas chargée
+et le call `0x4C4E19` observé reste celui de l'installation précédente.
+
+Ce lot change seulement mission, findings et deux identifications existantes
+plus celle du débit byte. Aucun changement source/DLL, test gameplay,
+save/reload, archive, commit ou push. La séquence autorisée est consommée;
+un autre lancement demanderait un nouvel accord. Le build reste un travail
+de développement incomplet distinct de Suite 1.3.3, pas prêt pour qtytester.
+
+## 2026-09-06 — Potion Stacking : initialisation unitaire et dépôt entier compensable
+
+GO de continuation, skills RE/incubation/mission; aucun contrôle de processus.
+Corpus commun, pin SDK API v3 `4933e2c4…2d1`, PluginPack `dc75b49f…e5d8a` et
+Loader 1.2.1 promu vérifiés. Le candidat 1.2.2 reste annoncé/non qualifié.
+Source autoritaire : `suite:plugins/potion-auto-pickup`. Aucun changement de
+baseline ni de portée de release; le chantier reste séparé de Suite 1.3.3.
+
+### La quantité recréée : deux étapes désormais exécutées hors jeu
+
+Le retrait `0x4FB7F8..0x4FB848` appelle `0x43D530` avec onze arguments :
+joueur, classe, game, mode 4, qualité 2, noSockets 1, noEthereal 1, niveau 1,
+puis trois zéros. Le wrapper logique finit au RET `0x43D65D`, au-delà d'une
+frontière PDATA fragmentaire. Sa request commence à RSP+0x20. RBP=RSP+0x100;
+les MOVUPS à RBP-0x80 et suivants initialisent donc aussi le DWORD request+0x64.
+`0x43D626` appelle `0x43CD50(game,request,flag)` avec ce champ nul. La fonction
+de création appelle ensuite `0x43EF10` à `0x43CF18`, avec RSI=item**, RBP=request
+dans le consommateur et R13D=1 établi à `0x43EF42`.
+
+Le bloc général `0x43F293..0x43F30E` lit minstack, maxstack puis spawnstack,
+choisit la plage `spawn-min` (repli max si spawn nul ou inférieur à min), roule
+par `0x153B00`, ajoute min et applique un override request+0x64 strictement
+positif. Il applique ensuite le prédicat single et la borne inférieure un,
+puis appelle `0x2F7940(item,70,quantité,0)` à `0x43F309`. Le RNG complet
+`0x153B00..0x153B50` retourne zéro sans lire ni avancer la seed pour une borne
+nulle/négative. Ce détail corrige la généralisation précédente « avance la seed ».
+
+Deux oracles Windows x64 sont ajoutés aux tests Potion existants :
+
+- exécution du wrapper complet 302 octets, avec toutes ses références RIP et
+  tous ses CALLs relogés vers probes/cookie factice. Le probe à la place de
+  `0x43CD50` capture la request et retourne null; aucun allocateur du jeu n'est
+  appelé. Cinq fixtures, dont des class IDs hauts, vérifient player/game, classe,
+  niveau 1, mode 4, qualité 2, flags 10 et quantité explicite zéro;
+- exécution du bloc général 123 octets, avec ses six helpers relogés vers des
+  probes et le **vrai RNG complet 80 octets** copié dans la même allocation.
+  Prefix/suffix préservent RBX/RBP/RSI/RDI/R13/R14 et établissent le contrat du
+  parent. Avec min=spawn=1, **511 plafonds × 16 seeds = 8 176 fixtures** donnent
+  exactement un write de stat 70 à un, layer zéro, seed et request inchangées.
+  Overrides 2/5/255/511 et spawn nul randomisé distinguent le test d'un stub
+  retournant toujours un.
+
+Les trois tableaux sont byte-exacts et uniques dans le corpus :
+
+| Instructions natives | Taille | SHA-256 |
+| --- | ---: | --- |
+| `[0x43D530,0x43D65E)` | 302 | `B26582A5C757CAC50AD2B9DC5627F08403DB2795A15BF06A2E91EEE2020B8402` |
+| `[0x43F293,0x43F30E)` | 123 | `B135BE3E63E76D999EB7E497E725903F15BD3B9216D23DECA8F7C568BFF904E7` |
+| `[0x153B00,0x153B50)` | 80 | `A3F3CE3EB6C463A2E6F427185730F43FEE78E86C99691F7D38BD83631B61BA95` |
+
+**Portée de la preuve :** request et bloc d'initialisation, pas l'ensemble de
+la création. Les branches gold/quiver/armor/weapon du parent et les
+post-traitements de qualité (`0x442D60` après `0x43F3B8`) empêchent d'en déduire
+le résultat de tout ItemType custom. Aucun hook global de création n'est ajouté;
+Transmogrify conserve sa surface et les sorties réelles restent à qualifier.
+
+### Conversion au crédit natif, avec inverse borné
+
+La preuve runtime du 5 septembre ferme déjà les cibles Core effectives.
+Le nouveau préflight vérifie entièrement les 70 octets de cap Core `+0x314680`,
+les 181 de crédit `+0x6A7990`, les sept imports consignés dans la section
+précédente et les 151 octets de débit natif `0x46DC90`. Il résout les deux
+chaînes CALL rel32 -> FF25 -> slot, vérifie qu'elles pointent réellement vers
+ces fonctions Core, et conserve les cinq octets actifs comme `expected` SDK.
+Les témoins autour des calls sont exacts :
+
+| Avant/après CALL | Octets |
+| --- | --- |
+| `0x4F9895` | `48 8B C8` |
+| `0x4F989D` | `3C 63 0F 82 BF 00 00 00` |
+| `0x4F9CCD` | `41 8B D7 48 8B CF` |
+| `0x4F9CD8` | `4C 8B F8 48 85 C0 0F 85 B7 01 00 00` |
+
+Ces séquences courtes ne sont pas des scans autonomes : elles participent à
+l'empreinte complète du dispatcher/dépôt, des corps Core et des relais actifs.
+Aucune décision sur numéro de build, canal, version Loader ou hash global.
+
+`GuardStashDeposit` établit une frame TLS après les contrôles propriétaire
+natifs. Les frames imbriquées se restaurent par `__finally`; une demande
+non gérée masque la frame précédente. La source est résolue par GUID serveur;
+`EffectiveQuantity` conserve les règles existantes compact legacy / zéro
+complet / payload Advanced Stash. Aucun champ d'item n'est normalisé ici.
+
+`WholeStackStashCap` conserve la réponse Core et capture le slot existant et
+son DWORD. Si la pile ne tient pas entièrement ou alias avec la source,
+retour 99 vers le refus natif avant mutations. Sans slot existant, la borne
+source<=cap est vérifiée à l'entrée et la registration native `0x46DAE0`
+reste propriétaire de l'objet qui deviendra slot.
+
+Au call `0x4F9CD3`, le wrapper relit source/propriétaire/quantité/plafond.
+Le kernel `CreditWholeStashStack` appelle le crédit Core unitaire N fois,
+au plus 255, avec contrôle du pointer résultat et du DWORD après chaque étape.
+Ces fonctions de compteur n'allouent pas et n'envoient pas de paquet.
+En succès, le slot revient au dépôt original : suppression de l'ancienne source
+si nécessaire, puis update final. Les éventuels paquets d'état source déjà
+émis avant le crédit ne sont pas supprimés ni qualifiés par ce modèle.
+
+En refus normal de crédit, le kernel inverse uniquement les crédits gagnés,
+un par un via `0x46DC90`, puis retourne null au chemin natif de repose.
+Ce débit byte est inverse du crédit DWORD **uniquement dans la plage 1..255**
+admise : aucune frontière d'octet n'est franchie. Le plafond Loader >255 refuse
+donc le dépôt géré, sans clamp de configuration ni modification de la capacité
+ordinaire. Aucun remboursement du retrait natif n'est intercepté.
+
+Un pointer inattendu, un compteur ne suivant plus le journal ou un débit
+défaillant est distingué d'un refus normal : `IntegrityFailure`, suspension
+des conversions suivantes et log demandant d'abandonner la session test sans
+sauver. Aucune boucle de retry, aucun restore aveugle d'un DWORD étranger,
+aucun succès inventé. La sûreté du recovery et l'observation des paquets en jeu
+restent ouverts; la simulation de compteurs ne les remplace pas.
+
+### Tests, collisions et statut
+
+**2 636 820** combinaisons de capacité vérifient limites invalides, compteurs
+pleins, limites 1/5/10/99/255 et refus des plafonds élargis. **163 200** scénarios
+de transaction couvrent chaque pile entière qui tient à cap 255 et cinq points
+de refus, dont premier/dernier crédit. Les callbacks simulent le crédit DWORD
+et le débit **byte**, pas un inverse DWORD fictif. Conservation source+stash,
+bornes, nombre de compensations et absence de boucle sont vérifiés. Les cas
+pointer étranger, fausse mutation, lecture indisponible et inverse défaillant
+refusent la restauration aveugle. Les anciens tests de garde unitaire devenue
+obsolète sont remplacés; migration/consommation/routage précédents restent testés.
+
+Deux relais leaf supplémentaires occupent +64/+80, page RX 94 octets utilisés;
+les cinq relais sont testés localement (cap AL, crédit pointer + class DWORD,
+ABI dépôt sept arguments, maximum destination et observer d'effet).
+Manifeste actualisé : **32 plages Potion**, **5 696 comparaisons ciblées sans
+chevauchement déclaré** avec les autres composants/patches. La composition Core
+est explicitement la conservation des cibles validées, sans write Core/IAT;
+ce contrôle littéral n'est pas la matrice des ordres de chargement.
+
+La régénération CMake générale échoue sur `MapSense/src/d3d12_gpu_diagnostics_tests.cpp`
+absent dans un chantier concurrent. Le CTest initial suivant cette tentative
+utilisait l'ancien exécutable et n'est pas retenu comme preuve des nouveautés.
+Les `.vcxproj` Potion existants sont ensuite compilés directement en Release
+avec MSBuild `/p:BuildProjectReferences=false`; DLL et nouvel exécutable sont
+effectivement recompilés, puis CTest Potion/source-policy **2/2 PASS**.
+Un warning C4127 du test de retour constant a été corrigé sans désactiver `/WX`.
+L'audit global reste en échec sur Shadow Master AI absent du manifeste;
+aucun fichier de ces deux chantiers étrangers n'est modifié.
+
+DLL 89 088 octets, SHA-256
+`6AE82555B2D3D00380D04F4AB01D5FC60BFCDAEF89AEE05D7E5ABAFD38581B50`.
+Test EXE SHA-256
+`8752522706E6AA7860FAB16D49321AE4EB9EA14D89EF8888E944DCE7AA4565BF`.
+Installé inchangé `E046FE72…54E6AE2`, hash revérifié. Aucun jeu lancé, save
+ouverte, déploiement, ZIP, commit ou push. Source/README/manifest et mission
+mis à jour, ROADMAP consultée sans édition. Dépôt/repose, retrait final,
+split partiel, placement manuel belt, potions custom, save/reload, visuel et
+gameplay restent ouverts : **build de développement non qualifié**, pas une
+livraison ni une compatibilité Steam ou pile complète déclarée.
+
+## 2026-09-06 — Potion Stacking : fusion partielle AutoPickup et retour natif du surplus
+
+GO continué en source dans `suite:plugins/potion-auto-pickup`. Atelier commun
+ready, mêmes hashes canonique/analyse vérifiés; aucun dump ou import neuf.
+Baseline Loader 1.2.1 promue, API 3 `4933e2c42cb2592958cd0df3b6dc5003102252d1`;
+1.2.2 demeure candidate annoncée. Pin PluginPack propre
+`dc75b49ffbb67b887d7757ee00ee9a03bcde5d8a`, aucune DLL tierce modifiée.
+Pas de nouvelle source D2MOO utilisée. La source publique reste autoritaire;
+ce lot ne rejoint pas la release Suite 1.3.3 déjà publiée.
+
+### Chemin natif conservé
+
+`0x471950` valide le ramassage (identité, collision, distance, mode sol,
+éligibilité/page), prépare le retrait du sol, puis appelle `0x4759E0` à
+`0x471B70`. Sa branche générique `0x475C4C..0x475C76` vérifie stackable et
+autostack, puis appelle `0x4754C0`. La fusion calcule destination et reste,
+appelle `0x43EB30` à `0x4755F0`/`0x475615`, puis synchronise le reste au joueur
+à `0x475731`. Le booléen retourné signifie **source entièrement absorbée**,
+pas absence de progrès : le cas partiel retourne false.
+
+Le caller entre alors dans `0x471BB0..0x471CEB` et propose successivement
+équipement, belt libre, inventory libre. Deux adapters de CALL remplacent
+`0x471BC5 -> 0x36B6A0` et `0x471C96 -> 0x3865B0`. Ils rendent le refus natif
+zéro sans toucher aux outputs seulement pour le GUID exact du scope TLS de
+fusion partielle belt, jamais pour un overflow inventory. Le hook belt existant
+refuse déjà d'offrir le slot occupé comme emplacement libre. Les autres scopes
+délèguent les arguments et retours originaux, sans nouveau hook de getter global.
+
+Le refus de position mène à `0x471CB2` : le CALL `0x471CD4 -> 0x43DD00`
+reçoit game, player null, source originale, room originale et XY sauvegardés
+tronqués par le natif à 16 bits non signés. Ce corps complet réinsère et
+repositionne l'item, rétablit mode 3/page FF et passe par `0x535C60`; il
+n'écrit pas directement la quantité. Notification native `0x18` conservée,
+puis false. Aucun nouveau paquet, clone, suppression, débit direct ou appel
+isolé au helper de fusion depuis le scan. La qualification du retour réel,
+de ses effets visuels et du réseau reste à faire.
+
+### Routage et portée
+
+`CanAttemptPickup` admet une quantité partielle seulement dans un slot belt
+existant choisi. Un cas `source=10, destination=3, cap=5` prévoit 2 transférées
+et 8 au sol. L'entrée exige des quantités inchangées depuis la sélection;
+après le ramassage, les deux GUID sont résolus à nouveau avant lecture, mode
+sol et quantités doivent correspondre pour compter `partialBeltPickups`.
+Un faux retour natif n'est donc plus compté automatiquement comme un échec.
+Le scope est effacé avec les autres données de routage, y compris après SEH.
+L'offre de destination reste unique; aucun retry ajouté dans un même scan.
+
+Le ramassage suivant recalcule la row. Si elle est vide et que la source est
+encore trop grosse, la garde whole-object la laisse au sol : **pas encore de
+découpage/création vers une case vide**, ni de modification des gestes manuels.
+Les drops ordinaires restent initialisés à une bouteille par le contrat
+minstack/spawnstack déjà implanté. Une « pile au sol » désigne notamment une
+pile que le joueur a jetée, pas une nouvelle règle de quantité des drops.
+Overflow et plafond hors belt demeurent inchangés.
+
+### Empreintes et validations
+
+Six témoins source comparés au corpus vérifié, tous byte-exacts et uniques :
+
+| Témoin | Début | Taille | SHA-256 |
+|---|---|---:|---|
+| fallback pickup | `0x471BB0` | 315 | `9CA788343B834EAEDB0BABEDD0D47F3682510CC2CA15F34C447B592AEDB40663` |
+| entrée auto-equip | `0x36B6A0` | 32 | `EBA258FF13DDA9646E525BB9F4F90BE8A04D87BFE93EC87B49B701C4703E6DEA` |
+| entrée position | `0x3865B0` | 32 | `DA330D429DAB8B009764AF7D76C1297C15E2D015A631E568E0F1A2F72853874F` |
+| fusion partielle | `0x4755B8` | 418 | `D8F288707CA49C9AC1C8857F9310212BE0895C14D6A2A39A8C8B3F3A99C8B9F0` |
+| set-stat complet | `0x43EB30` | 137 | `D7BEDFB66704B76D8FBC1AA79D4F1E3FEB3C0879BC66DA89A0C0682DFED90FD2` |
+| retour sol complet | `0x43DD00` | 271 | `1D7D2C593A8BD65C5F39E0F58FD182B901FD773B0F9D81C7C530E62A66B42511` |
+
+Un oracle Windows x64 exécute les 315 octets du fallback, copiés byte-exact
+dans les tests. Ses quinze CALLs, trois LEA RIP de diagnostics et trois exits
+hors fragment sont relogés vers des probes/terminaisons locales. Le prologue
+synthétique préserve l'ABI et reproduit notamment R12D initial nul. Aucune DLL
+de jeu chargée ou appelée. **3 072 fixtures** = 16 scopes × 16 disponibilités
+de destinations × 4 XY × 3 valeurs game+106. Elles vérifient les arguments
+de quatre et six paramètres des adapters, y compris les slots de pile,
+l'absence d'appel aux recherches refusées et les arguments de re-drop/notice.
+Les exits normaux restent possibles pour les autres scopes. Les helpers de
+fusion et re-drop réels ne sont pas exécutés par cet oracle.
+
+Les **1 572 864** couples de quantités/plafonds testent aussi l'admission
+partielle, la conservation, les slots vides, sur-cap et quantités ambiguës.
+Builds MSVC Release ciblés DLL et tests PASS, CTest Potion/source-policy **2/2**.
+Un warning de conversion du remplissage NOP a été corrigé sans affaiblir /WX.
+Empreinte PE x64, trois exports SDK exacts. **34 plages, 6 052 comparaisons**
+ciblées sans overlap; sept relais occupent 126 octets de la même page publiée
+(nouveaux +96/+112), avec durée de vie processus inchangée. L'audit global
+relancé échoue encore sur le patch Shadow Master AI absent du manifeste,
+hors lot; aucun verdict de coexistence complète.
+
+DLL locale 93 184 octets SHA-256
+`43259B33594155FC7A06C56392EDA48B59CA3E2B2CB232AFFE195E914EA81B3E`.
+Tests SHA-256 `C2394EC0188DC9F4687D619EC26F4F0C60A8447CA9186B787F38415D94BD70EE`.
+Installé rehashé inchangé `E046FE72…54E6AE2`. Aucun lancement/contrôle de jeu,
+save ouverte, config modifiée, déploiement, ZIP, commit ou push. Mission et
+README actualisés; ROADMAP consultée, non modifiée. Restent : création vers
+case vide, gestes manuels/caps, potions custom, conversion/retrait final,
+save/reload et qualification gameplay/pile complète. Ce n'est pas encore un
+candidat de test complet.
+
+Contrôle final : les trois nouveaux RVA et l'entrée enrichie sont uniques.
+Le contrôle global d'unicité rencontre quatre autres adresses déjà répétées
+(`0x38FC70`, `0x38FD00`, `0x34B9D0`, `0x38B070`), hors des ajouts du lot;
+elles sont préservées, sans déclarer le registre entier sans doublon. JSON
+parseable, cadastre VALID, diff-check ciblés sans erreur. Checkpoint rafraîchi.
+
+## 2026-09-05 — More Materials Tabs : prototype 0.1.0, preuves hors jeu
+
+Mission autorisée : `plugin-dev/more-materials-tabs/mission.md`. Empreinte source et ABI :
+`addons/MoreMaterialsTabs/native-fingerprint.json`, 37 témoins vérifiés contre
+l'image commune SHA-256
+`673E8C0B2E89563E75525B24D137098EFD07B2DB4ED42ADEC56AA1ADDF0E63AB`.
+Les 11 identifications stables rejoignent `known-rvas.json`; elles restent
+statiques et ne constituent pas une qualification en jeu.
+
+BankPanel conserve son allocation `0x2B0`, cinq pointeurs à `+0x278` et le Cube
+à `+0x2A0`. Le prototype accroche l'initialisation `0x23B1B0`, la sélection
+sémantique `0x23AF50` et le refresh `0x23E630`. Les conteneurs supplémentaires
+sont retrouvés dans l'arbre natif à chaque callback. Pendant le refresh, une
+vue empruntée remplace temporairement le pointeur Materials et la sélection
+TabBar puis les restaure; aucun agrandissement du tableau BankPanel n'est tenté.
+Les prédicats continuent d'utiliser Materials, alors que les retours exacts
+`0x23D29E` et `0x23BBD7` conservent l'index réel pour cache et notification.
+Le callsite `0x23EAA4` publie la catégorie réelle dans le modèle de bindings.
+
+Le TabBar `0x878690` possède déjà huit places; trois extras suffisent pour six
+catégories spécialisées. Le registre `0x160810` copie des sets temporaires
+vers des catégories dynamiques 4..6, et `0x15EF70` parcourt toutes les catégories.
+La vue source des sets est vérifiée indépendamment par offsets : 32 octets pour
+la vue, nœuds chaînés de 16 octets avec classe à +8. Le prototype ne reproduit
+pas l'allocateur du jeu. Le transfert `0x159A30` utilise la catégorie pour la
+notification locale; le paquet natif 0x63 ne transporte pas l'index d'onglet.
+Slots, compteurs, transferts et format de sauvegarde restent des chemins natifs,
+dont le comportement effectif pour les catégories ajoutées reste à tester.
+
+Les quatre sentinelles de notification passent de 5 à 8, le mapping à
+`0x23BBB0` accepte les catégories 1..6, et la boucle `0x23BCD7` couvre les huit
+emplacements déjà présents. `0x879470` tolère un pointeur de notification nul.
+L'audit D2RCore trouve le descripteur natif `0x23E630` à `Core+0x5A95E0`; ses
+wrappers demeurent propriétaires de leurs callsites. Aucune plage propre au
+prototype n'a de chevauchement RVA littéral dans les 212 sources Suite/eezstreet
+auditées; l'ordre effectif des hooks et la coexistence runtime restent ouverts.
+
+Build Release x64 `/W4 /WX`, CTest 1/1, layouts Node 2/2 et audit PE PASS.
+Les tests chargent la vraie DLL avec un SDK simulé, corrompent chacun des 37
+témoins avant toute mutation et exécutent les 256 entrées du mapping x64.
+Ils ne font pas tourner le jeu ni son allocateur de registres. DLL 41 984 octets,
+SHA-256 `E49FB6182FC6B16D7CBD72BB4A9F5EB069AA76A48E67FF2677E07CAFFE6EE844`.
+Le témoin à six onglets place El Rune uniquement dans Extra 1. Un staging de
+quatre fichiers et son Sync-BKVince Plan sont prêts, sans application runtime.
+Une DLL refusée impose de restaurer les layouts avant ouverture du coffre :
+les layouts étendus dépendent de l'extension native. Aucune sauvegarde modifiée,
+aucun contrôle de processus, aucune archive ni promotion Suite dans ce lot.
+
+
+## MapSense — contrat ObjectInteract étendu observé sous Loader 1.2.2 (2026-09-06)
+
+Le PID 38196, D2R officiel 3.3.93847 sous les artefacts enregistrés
+D2RLoader 1.2.2-beta+candidate.2, est observé par ReadProcessMemory sans
+appel natif, écriture, suspension ou entrée jeu. Le corpus canonique reste
+CC59119DC2A6C7D43D088098FC162EAFA4AE1299B2079126AEF43C1ACA914715.
+Le getter natif 0x34AD40 fait 72 octets; son unique divergence est une plage
+de 8 octets à 0x34AD7E (le refus MapSense 0x34AD61 nommait une plage témoin
+qui englobe cette modification). JMP rel32 + trois NOPs vers le relais observé
+0x143E2C5D0; les 17 octets de travail sont exactement :
+
+    0F B6 48 78 C1 E1 08 0F B6 40 08 0B C1 48 83 C4 20
+
+Ils lisent byte [ObjectData+0x78] dans ECX, décalent de 8, lisent le byte
+[ObjectData+0x08] dans EAX, puis combinent dans EAX et restaurent RSP+0x20.
+Un JMP rel32 retourne exactement à D2R+0x34AD86 (POP RBX; RET). ABI observée
+Unit* en RCX, résultat EAX zéro-étendu 0..65535, ECX volatile. MapSense
+consomme déjà uint32; aucune réduction au byte n'est ajoutée.
+
+Le setter natif 0x34E9D0 fait 84 octets. Seule la plage de 8 octets à
+0x34EA1A change pour JMP rel32 + trois NOPs. Le relais observé 0x143E2C5F0
+contient exactement les 12 octets de travail :
+
+    40 88 78 08 C6 40 78 00 48 83 C4 20
+
+Il conserve l'écriture DIL vers ObjectData+0x08, remet ObjectData+0x78 à zéro,
+restaure RSP+0x20, puis JMP exactement à D2R+0x34EA22 (POP RDI; RET).
+La lecture uint8 de l'argument par le corps original demeure exacte. Le setter
+préserve donc les valeurs byte historiques et évite de conserver un octet haut
+obsolète sur cette voie. MapSense ne l'appelle pas, mais vérifie ce compagnon
+de contrat avant d'accepter le getter étendu.
+
+Les adresses des relais sont des observations de session, jamais des constantes
+de chargement. Les empreintes acceptées couvrent les deux corps complets, le
+JMP + padding exact, les instructions complètes des deux relais et leurs retours.
+Les pages doivent être commises, lisibles et exécutables, sans PAGE_GUARD.
+Aucun détour arbitraire ni wildcard de corps/layout n'est accepté; aucun numéro
+de build/Loader, nom de canal ou hash de DLL ne sélectionne le profil.
+L'origine précise du générateur des relais n'est pas attribuée au-delà de la pile
+observée : les séquences brutes n'ont pas été trouvées dans le Core retail.
+
+Sources : suite:plugins/mapsense/src/native_object_interact_contract.hpp et
+_tests.cpp; plugin-dev/mapsense/testing/runs/mapsense-reveal-compat-20260906/native-observation.json
+(deux lectures identiques), compiled-live-probe.log et remaining-poi-witnesses.json.
+Le prédicat compilé accepte SplitByte16 en 4 lectures/195 octets; les 12 autres
+témoins POI (399 octets) concordent. 2 846 contrôles unitaires passent : vanilla,
+extension, relocalisations dans les deux sens, chaque bit altéré, états partiels,
+retours erronés, lectures absentes/tronquées et protections des pages.
+La DLL adaptée n'est pas encore chargée : comportement visible, transitions,
+pile complète et réseau restent indépendamment non qualifiés.
+
+
+## 2026-09-06 — Revive threat reader, confirmed static only
+
+The canonical PE and SQLite index passed re:d2r33 status. Native disassembly
+of 0x48FE20 proves the existing target resolver calls UNITS_GetDynamicPath
+0x34AE80 at 0x48FE31, then PATH_GetTargetUnit 0x341A40 at 0x48FE39. The latter
+has the complete unique body `48 85 C9 75 03 33 C0 C3 48 8B 41 70 C3`:
+ABI `(DynamicPath*) -> Unit*`, null returns null, otherwise reads path+0x70.
+Scripted AI 0.7.1 uses the independent accessors and compares the returned
+pointer with the current Revive without dereferencing it. This neither calls
+nor claims ownership of Cast Triggers' 0x48FE20 hook.
+
+The threat traversal reuses governed UNITS_GetRoom 0x34B440,
+DUNGEON_GetRoomListAndCount 0x2EFDE0, DUNGEON_GetFirstUnitInRoom 0x2EFD90,
+UNITS_GetNextUnitInRoom 0x34B4A0, SUNIT_CanDamageTarget 0x48E060 and existing
+identity/death/server lookup contracts. It explicitly includes the current
+room, deduplicates room pointers, caps neighbor entries at 32 and unit visits
+at 512. Native adjacency membership/exhaustiveness remains unpromoted; no
+runtime threat-detection result is inferred from the fake-room unit tests.
+All seven added fingerprint windows are byte-exact and unique in the common
+PE. The Ghidra query at 0x4398B0 returned an incorrect neighboring function;
+that decompilation was rejected and no area-enumerator ABI was introduced.
+
+Coexistence stop: Revive owns the 0x596720 distance entry hook, whereas the
+Scripted AI candidate still checks its vanilla entry. Both load orders need
+a governed shared contract before deployment. See the current Scripted Domains
+mission and plugin VALIDATION files; no loader original-byte behavior is assumed.
+
+
+### Qualification runtime du contrat ObjectInteract — complément du 6 septembre 2026
+
+MapSense 1.0.3 diagnostic 0A67A1CF43230E4DB32BED6C6C6708298291B2C7EF180B972BAB5062876E7A4B
+a ensuite été déployé sous les mêmes artefacts Loader 1.2.2 candidate.2, PID 43940.
+Le contrat split-byte est accepté à 11:16:08.168 EDT, le startup atteint 24/24,
+et plusieurs publications atlas COMPLETE sont observées en actes I et II.
+Vincent confirme « good les features sont revenus ». Cette qualification
+fonctionnelle limitée complète les sondes en lecture seule ci-dessus; les
+isolations préexistantes interdisent toujours un verdict de pile complète.
+Preuve : plugin-dev/mapsense/testing/runs/mapsense-reveal-compat-20260906/runtime-20260906T151432Z/.
+
+
+## 2026-09-06 — Revive distance ownership V4 closure (static)
+
+After Vincent's explicit GO, the shared-distance gate is closed in the sources:
+Revive Overhaul 2.3.2 remains the only 0x596720 entry-hook owner and supplies its
+already-validated original trampoline synchronously to Scripted AI 0.7.2.
+The private tactical request is version 4, magic 0x3456495645524941, size 80;
+the originalDistance callback occupies offset 72 on x64. Scripted AI removes
+the direct RVA resolver and the duplicate vanilla-entry window, leaving 35
+byte-exact unique native windows. Its persistent distance slot is null; all
+Revive distance calls are bound only to the per-call local function table.
+No new native function, layout or hook is introduced. Older V3 consumers and
+providers do not negotiate V4 and fall back to native AI. Static builds/tests
+and export inspection pass; full-stack runtime/load-order proof remains open.
+
+## 2026-09-06 — Outdoor size: four native coordinate stack-buffer overflows
+
+The resumed Warren size investigation verified the common corpus through
+`npm run re:d2r33 -- status` and then ten exact, unique witnesses with
+`node scripts/reverse-engineering/outdoor-level-size-audit.js --write`.
+All witnesses are byte-identical in the canonical image
+`CC59119DC2A6C7D43D088098FC162EAFA4AE1299B2079126AEF43C1ACA914715`
+and the governed analysis image. The script is authoritative; its JSON report
+under `analysis-cache/outdoor-level-size-gate/` is a disposable derived view.
+
+The 121-byte window at `0x3EE333` divides Level width/height (`+0x2C/+0x30`)
+by eight, truncating signed division, writes Outdoor grid dimensions at
+`+0xB0/+0xB4`, and calls `0x3FA7F0` four times. The latter's contiguous
+175-byte body allocates `4*height + 8*width*height` bytes and builds row
+offsets. Neither window contains a 50-cell clamp. Its 32-bit allocation
+arithmetic does not establish safety for arbitrarily large dimensions.
+
+Four downstream placement paths enumerate the full interior grid area into
+fixed stack coordinates. Each pair consists of two 32-bit coordinates:
+
+| Semantic path | Entry / fill | Buffer offset from current RSP | Cookie offset | Capacity |
+|---|---|---|---|---|
+| Act I/II shrines | `0x3ECD60` / `0x3ECDF1..0x3ECE09` | `0x40` | `0x840` | 256 pairs |
+| Random outdoor DS1 | `0x3ED260` / `0x3ED2E4..0x3ED302` | `0x80` | `0x880` | 256 pairs |
+| Outdoor presets | `0x3ED5E0` / `0x3ED660..0x3ED678` | `0x50` | `0x850` | 256 pairs |
+| Waypoint fallback | `0x3EDAC0` / `0x3EDBE0..0x3EDBF8` | `0x40` | `0x840` | 256 pairs |
+
+The loops use `(gridWidth-2)*(gridHeight-2)` as their bound without checking
+against 256. Index 256 writes exactly over the stack cookie in every path.
+Cold Plains has a specialized earlier waypoint branch, so the waypoint
+finding applies only when the fallback executes. PDATA fragments cut several
+instructions; continuous canonical disassembly was used to resolve them.
+No complete hook ABI, replacement routine, or unwind rewriting is approved.
+
+Blood Moor reachability is independently proven. The Act-I dispatch tests
+`Id-2 <= 5` at `0x3FAD64` and calls shrines at `0x3FAD74 -> 0x3ECD60`.
+The 60-byte special-preset switch at `0x3FB1AA` reads selector zero for
+`Id=2` from `0x3FB550`, selects `0x3FB1E6` through the RVA table at
+`0x3FB52C`, and calls random DS1 placement at `0x3FB1F4 -> 0x3ED260`.
+
+For square dimensions divisible by eight, 144 gives an 18×18 grid with
+16×16=256 interior entries; 152 gives 19×19 and 17×17=289. The previous
+400/408/512 cases would enumerate 2304/2401/3844 entries. This is a bound
+for these placement buffers, not a universal playable-size limit. The units
+behind Warren's approximate 50×50 report remain unspecified.
+
+D2MOO is credited as semantic corroboration only, commit
+`19019806df7f3e877fa105b05395d1e3597e2316`,
+`source/D2Common/src/Drlg/DrlgOutdoors.cpp:343,406,475,584` and
+`DrlgOutWild.cpp:219,452`. Native addresses, offsets, stride, cookies and
+call reachability were established separately from the D2R image.
+
+Runtime status: **not run**. A concurrent MapProbe process appeared before
+deployment and was left untouched. No snapshot/deployment receipt was created,
+no BKVince runtime file was modified and no authorized start was consumed.
+The static finding subsequently invalidated the oversized matrix, which is
+now explicitly suspended in both local controllers. Active D2RLoader 1.2.2
+patches have not been inspected on these paths, and no new runtime crash is
+claimed. The next design gate must preserve generation ordering/RNG and
+network determinism while replacing storage, followed by a separately
+confirmed boundary test protocol. Automap Serialization Fix remains a
+distinct, already-tested serializer correction.
+
+### Isolated native shuffle equivalence and remaining ABI gates
+
+`scripts/reverse-engineering/outdoor-shuffle-oracle.py` subsequently passes
+240 cases: four original native shuffle slices, ten interior rectangles
+(1..3844 entries, including 256/257/289), and six two-word seeds. Exact
+coordinate bytes, final seed words and both private-buffer sentinels match
+an independent arithmetic model. This Windows-only oracle opens no game
+process; it redirects each unchanged slice's stack-relative coordinate
+accesses to private storage and audits all reachable instructions before
+execution. It does not execute the unsafe fill or a complete placement path.
+The local report is `analysis-cache/outdoor-level-size-gate/shuffle-oracle-result.json`.
+
+Four complete continuous bodies are now also hash-checked in both images:
+shrines `0x3ECD60..0x3ECFB1`, random DS1 `0x3ED260..0x3ED5D5`, presets
+`0x3ED5E0..0x3ED7E9`, waypoint `0x3EDAC0..0x3EDD93` (exclusive ends).
+Each shuffle performs N swaps, taking two independent indices modulo the
+full N. The state transition is `uint64(low)*0x6AC690C5 + high`; Level
+seed fields are `+0x1E4/+0x1E8`. Replacing this with another shuffle changes
+the map even if the distribution appears equivalent.
+
+Shrines advance the seed once before the zero-area check. Random DS1
+placement can invoke the generic preset path at `0x3ED591`, which shuffles
+again: replacement storage must support nested invocations. Cold Plains'
+earlier waypoint path uses a native bit-10 predicate and consumes no shuffle
+draws when successful; D2MOO is not a substitute for that native predicate.
+The observed context arguments, helper calls, architecture alternatives and
+rollback plan are recorded in `plugin-dev/automap-serialization-fix/mission.md`.
+
+Initialized data remains unproven: neighbor arrays `0x1D0FD40/48` and shrine
+flags `0x1D0FD50` are zero in the governed PE files, while grid operation
+table `0x238A580` has no raw-file backing. A read-only attempt against the
+concurrent MapProbe PID 42436 failed on the first code read and yielded no
+usable snapshot. No process was controlled. The next proposed capture is
+one BKVince menu-only session under the target loader, pending operational
+confirmation. Allocation-failure semantics, active callsite ownership,
+complete replacement ABI, placement behavior and multiplayer remain open.
+No outdoor-size DLL or memory patch has been implemented.
+
+### BKVince menu inspection — 2026-09-06, initialized placement data
+
+Vincent approved exactly one menu-only start after the concurrent MapProbe
+ended. The installed Battle.net D2R 3.3.93847 and D2RLoader
+1.2.2-beta+candidate.2 retained their previously recorded hashes. The launcher
+PID 6812 created the game-host D2RLoader.exe PID 29960; its native image base
+was 0x140000000. The promoted baseline remains public 1.2.1.
+
+At 20:05:00 America/Toronto, a read-only external capture read 22 bounded
+ranges (4650 bytes per pass) twice with identical results. It performed no
+memory write, remote call, suspension or game entry. Nineteen code/selector
+ranges match the governed canonical bytes, including all four complete
+placement bodies, the grid-allocation call window, the shrine dispatch,
+Blood Moor's selector/call/tables, and the inspected helper samples.
+No replacement is present in those exact windows at the menu. This does not
+prove gameplay execution, uninspected upstream routing or absence of later
+patches. The four partial helper samples do not become complete ABI proofs.
+
+The initialized data, previously unavailable from the PE files, is now
+observed independently of D2MOO:
+
+- `0x1D0FD40`: signed X offsets `[-1,0,0,1,-1,1,1,-1]`.
+- `0x1D0FD48`: signed Y offsets `[0,-1,1,0,-1,1,-1,1]`.
+  The 16-byte combined window is `FF000001FF0101FF00FF0100FF01FF01`,
+  SHA-256 `A439E7943EC45D8BB99F98B7A82696F541DF7744DB01C1B3D7B2E8C0229D41FE`.
+  MOVSX loads at `0x3ED430/0x3ED440` in the exact DS1 body establish signed
+  byte interpretation and index order.
+- `0x1D0FD50`: four DWORD shrine masks `[0x1000,0x2000,0x4000,0x8000]`,
+  SHA-256 `6131F2C791161FB0C27A4CE0EE299630EAE52ACD7958719C5B591937DF97E3B1`.
+- Grid dispatch table `0x238A580`: slot 0 points to `0x3F9FE0`, whose complete
+  body `48 09 11 C3` performs `*cell |= mask` on a 64-bit cell; slot 1 points
+  to `0x3F9FF0`, body `48 21 11 C3`, performing `*cell &= mask`.
+  These two leaf bodies also match the canonical image. The 50-byte
+  dispatcher `0x3FAA50..0x3FAA82` is exact, hash
+  `0C7C89F8A7E3974C745A59695EB2FBBCD27B8FE3B4D6007E8CC816C9246A1869`.
+  Eight qwords were sampled to bound the read; they are not evidence of
+  eight valid operation entries. Only slots 0/1 are promoted by this record.
+
+The data must remain runtime fingerprint requirements for any replacement;
+zero-filled or unbacked canonical data is not a multibuild equivalence proof.
+Two matching reads per range do not constitute an atomic whole-process
+snapshot. Native allocation-failure semantics, complete placement ABIs,
+placement equivalence and multiplayer remain open.
+
+Startup completed 24/24 at 20:04:32.365 with 36 plugins, all five eezstreet
+DLLs in their existing configuration, 17 patches and only the known Doll
+Explosion rejection. The Exit Diablo II button closed the one game instance;
+by 20:06:10 there was no D2R/D2RLoader process. All 296 protected file hashes,
+including BKVince configs and saves, were unchanged. No relevant Application
+crash event was found in the run window. This is a targeted menu observation,
+not full-stack qualification or a large-map gameplay test.
+
+Local evidence: `analysis-cache/runtime-validation/outdoor-menu-20260906/`
+(`native-capture.json`, bounded `.bin` windows, `run.json`, protected-file
+manifests and time-filtered `fresh-logs/`). Stable data/leaf identifications
+are recorded in `known-rvas.json`; the unsafe 80/408/512 matrix stays suspended.
+
+### Outdoor entry ABIs and isolated selection — 2026-09-06
+
+`scripts/reverse-engineering/outdoor-placement-oracle.py` passes **5372**
+native/reference fixtures: shrines 1650, random DS1 1038, presets 1566,
+waypoint 606 and preset-fit 512. It copies the four complete unchanged
+placement bodies and the native grid-read, bounds and preset-fit helpers
+into private Windows pages. Hashes of both governed source images, every
+body, direct control-flow targets and RIP references are checked first.
+Only required pages are committed, code becomes RX, constants become R,
+and uncommitted holes stay inaccessible. It opens no game process.
+
+The native fill is exercised only for interior N in 0..256. Row lookup,
+Vis lookup, final DS1 construction and OR dispatch are local test doubles;
+the stack-cookie check uses a private cookie. Returns, seed words, helper
+arguments/order, grid writes, fixture immutability and surrounding guards
+match the independent semantic model. Coverage includes six seeds, eleven
+rectangles, all eight DS1 neighbor choices, all sixteen footprint flags,
+signed offsets, Cold Plains corners, first/no Vis match and Y/X scan order.
+Report: `analysis-cache/outdoor-level-size-gate/placement-oracle-result.json`.
+The earlier 240 shuffle cases independently extend through N=3844; neither
+test runs an oversized native stack fill or proves a replacement DLL.
+
+The observed Win64 entry contracts are now recorded in the mission:
+shrines = void(Level*, int32 count), random DS1 = EAX 0/1(uint8 context,
+Level*, int32 preset, int32 variant), generic presets add int32 offset and
+32-bit flags as arguments 5/6, and waypoint = void(uint8 context, Level*).
+Preset-fit `0x3EE0D0` returns AL and takes context/Level/X/Y/preset/offset/flags.
+Final preset placement `0x3ECFC0` takes context/Level/X/Y/preset/variant and
+a **byte** border argument. These are invocation contracts, not qualified
+hook/trampoline ownership or runtime construction equivalence.
+
+The DS1 center predicate at `0x3ED424` requires bit 7 in AL; the `0x1B81`
+mask applies to prospective neighbor footprints. Shrines draw once even
+at N=0, and shuffle even for nonpositive requested counts when N>0. DS1
+fallback at `0x3ED591` passes offset 0/flags 15 and performs another shuffle.
+Cold Plains special success requires bit 10, consumes no shuffle RNG and
+uses the first Vis 2; no match yields index 8, not an early failure.
+
+Ten additional exact support ranges are reproducible through
+`outdoor-level-size-audit.js`: grid read/validity, preset-fit/placement,
+preset lookup, Vis lookup, allocator initialization/getter/vtable assignment,
+and the preset-false fallback caller. Their hashes and lengths are in the
+script and `known-rvas.json`. Final DS1 internals and allocation remain
+outside the isolated execution proof.
+
+**Allocation gate remains open.** Grid allocation and the 24-byte variant
+node directly use allocation results without checking null. This is not a
+non-null guarantee or an established OOM policy. `0xA20BB0..0xA20C72`
+initializes a 0x3200000-byte (50 MiB) backing store from an underlying
+allocator, whose pointer is saved at `0x27D7850`. `0xA20C80..0xA20C88`
+returns the object address `0x27D7848`. Static constructor
+`0x4A560..0x4A58E` assigns vtable `0x1D6D770`; that table and initialized
+object are not backed by useful bytes in the PE files. The allocation
+slot is +8, but its runtime target, failure policy and deallocation ABI
+are not proven. Do not label this allocator no-fail or assume a hard cap.
+
+A zero preset return is not a generation abort: the exact
+`0x3EE64C..0x3EE68D` caller window can execute `0x3EDDA0` and then place
+directly at `0x3EE688`. The verified index lists 7 direct shrine calls,
+6 random-DS1 calls, 61 preset calls and 4 waypoint calls; indirect routing
+is not made exhaustive by those counts. A replacement may not silently
+skip placements or fall back to the overflowing routine after OOM.
+
+Next proposed evidence is a separately authorized menu-only inspection
+of the allocator object/vtable and underlying provider, following only
+bounded, observed method slots and completing the previously partial helper
+samples. No runtime start, hook, DLL, Levels edit or native allocation was
+performed in this analysis pass. The mission records the bounded capture
+plan and the remaining allocation, gameplay and multiplayer gates.
+
+### Large Maps Fix allocator resolution and null path — 2026-09-06 22:42
+
+The following evidence supersedes the unresolved allocator targets above.
+The public product is **Large Maps Fix**, DLL
+`d2rl-ruffneckk-large-maps-fix.dll`: one standalone Suite plugin will combine
+the serializer and outdoor placement fixes. No combined DLL is implemented
+or qualified by this inspection; the historical serializer artifact remains
+a separate rollback proof.
+
+After MapProbe ended independently, the confirmed single BKVince menu run
+started at 22:41:08 America/Toronto, launcher 28188 / host 38536, base
+0x140000000. The menu was observed at 22:42:00 and the Exit Diablo II button
+closed the instance by 22:42:50, without entering a game. Battle.net D2R
+3.3.93847, D2RLoader 1.2.2-beta+candidate.2 and their hashes were unchanged;
+the governed promoted baseline remains 1.2.1.
+
+`scripts/reverse-engineering/large-maps-allocator-inspect.py` captured 24
+stable ranges in two read-only passes. All 20 sampled code ranges match the
+canonical image, including the four complete placement bodies and previously
+partial final-placement/helper samples. Two allocator objects/vptrs and two
+five-slot table samples account for the remaining four ranges. Only slots
++8 and +0x20 were followed; other slots are not named from adjacency. There
+were 21,161 requested bytes per pass (42,322 total), covering 13,401 distinct
+addresses because method windows overlap. A separate 4,096-byte PE-header
+read identifies the process image. The receipt explains the original counter
+label and preserves raw capture evidence.
+
+- DRLG object 0x27D7848 has vptr 0x1D6D770, allocation slot +8 = 0x82DAD0
+  and release slot +0x20 = 0x82DC60. The 50 MiB backing is initialized;
+  metadata starts at its observed backing address. The complete cleanup
+  caller 0x1BDBA0..0x1BDC1E proves allocator RCX / block RDX at the +0x20
+  release dispatch. Its owning list's gameplay role is not promoted.
+- Allocation 0x82DAD0..0x82DB36 takes (object, uint64 bytes, uint64 alignment),
+  locks object+0x28, calls 0x1215D60(pool at object+0x20, alignment, bytes),
+  preserves the result across 0x120D270 and returns it after unlocking.
+  No branch grows the reserve, delegates to the backing provider or changes
+  a null result into a generation-abort status.
+- Release 0x82DC60..0x82DCAA calls auxiliary 0x120D600 and pool release
+  0x1215C30 under the same lock. Backing-provider table 0x1E98770 resolves
+  slots +8/+0x20 to 0x1206330/0x1206350. These are wrappers, not a reason to
+  free an interior pool allocation through the backing provider.
+- Pool aligned allocation 0x1215D60..0x1215EC0 proves the alignment meaning
+  through masking arithmetic. Free-block search 0x1215700..0x1215865 returns
+  zero when class bitmaps have no candidate, notably 0x12157C8..0x12157D3.
+  Block preparation 0x1215870..0x121590A preserves null; pool release
+  0x1215C30..0x1215CED returns immediately for null. These four helper bodies
+  match both governed images but were not separately captured at runtime.
+
+`--failure-oracle` passes 40 empty-bitmap aligned-allocation fixtures and one
+null-release fixture using these four unchanged pool bodies. Code is private
+RX; zero availability bitmaps are in a read-only page between inaccessible
+guards. No image globals, game handle, remote call or real pool backing is
+used. Success-only insertion/removal targets remain local trap bytes, not
+success stubs. Sizes include 2048/2312/30752 bytes (N=256/289/3844), zero,
+50 MiB and 16 GiB with alignments 1/8/16/64/4096. This proves the controlled
+pool failure path, not live exhaustion, successful allocation/free, wrapper
+callbacks, reserve utilization, fragmentation or clean generation abort.
+
+Startup reached 24/24 with 36 plugins and 17 patches; the sole fresh error
+was the known Doll Explosion fingerprint refusal. All 297 protected binary,
+config, patch, save, modinfo and Levels hashes were unchanged. Thirty fresh
+log files contain 301 lines and no relevant Application crash was found.
+This is targeted menu evidence, not full-stack or large-map qualification.
+The -txt engine compilation can regenerate derived BIN files outside that
+protected set. No additional runtime start is authorized by this sequence.
+
+The native allocation/release identification gate is closed in this scope;
+the generation-abort gate remains open. The pool is not a no-fail allocator.
+Using it for scratch coordinates would consume the same reserve used by
+native grids and nodes without solving the error contract. Private storage
+per invocation remains a candidate, conditional on a proven clean failure
+path. Returning zero, skipping required placements or reentering the unsafe
+fixed buffer is not such a path. The SDK v3 headers inspected expose no
+explicit generation-abort service; keyword absence alone is not a proof
+that no native mechanism exists.
+
+Evidence: `analysis-cache/runtime-validation/large-maps-allocator-20260906/`
+and `analysis-cache/outdoor-level-size-gate/allocator-failure-oracle-result.json`.
+Nine stable method/helper/caller identifications and exact hashes are added
+to `known-rvas.json`; the shared native corpus remains authoritative.
+
+### Large Maps Fix implementation evidence — 2026-09-07
+
+The standalone `Large Maps Fix 0.1.0` candidate now combines the outdoor
+placement replacement and the established automap byte-count correction. The
+generator entry `0x3EE320` is used as a preflight boundary; its direct caller
+window at `0x3271F5..0x327236` confirms that execution continues without
+consulting a generation status. Both stable identifications are recorded in
+`known-rvas.json` with exact range hashes.
+
+The source audit verifies 14 governed code ranges, instruction-aligned hook
+entries, the runtime coordinate/mask tables and the normalized grid OR target.
+The fail-closed gate is independent of build name, version and distribution
+channel. The four oversized placement paths allocate private scratch per
+invocation, including the nested random-DS1 fallback. The native shuffle is
+preserved as N transpositions with two independent draws over the full N on
+each iteration; it is not Fisher-Yates.
+
+Two clean MSVC 19.44 Release x64 `/W4 /WX` builds are byte-identical. The DLL
+is 32,768 bytes, SHA-256
+`356597426A2A4BC38CBBF5BC668615E1EB4A5740DFE146AE1E20B0DA42DB413C`, and
+exports only the three D2RLoader plugin functions. The offline harness passes
+5,376 semantic cases and four child-process terminal cases, each with exact
+`STATUS_FAIL_FAST_EXCEPTION` (`0xC0000602`). The workbench self-test passes.
+
+This evidence does not qualify runtime hook trampolines, their unwind behavior,
+D2RLoader restoration after partial managed-install failure, old/new provider
+refusal in both runtime load orders, full-stack coexistence, gameplay or
+multiplayer. No D2R process was started while collecting this offline evidence.
+
+A later mod-local cold start used the same DLL hash on Battle.net D2R
+`3.3.93847` with D2RLoader `1.2.2-beta+candidate.2`. The plugin validated its
+complete fingerprint, became active and reached startup `24/24`. The
+all-features PluginPack profile exposed unrelated eezstreet patch failures, so
+complete coexistence remains blocked. The instance closed normally; all 123
+protected runtime files and 655 save files matched their pre-test hashes after
+restoration. This closes only the candidate-stack load/startup gate, not the
+remaining trampoline, large-area, persistence, rollback or multiplayer gates.
+
+### Large Maps Fix secondary-border overflow — 2026-09-07
+
+The first exact gameplay boundary matrix invalidated the five-hook candidate.
+Rocky Waste at 144x144 source tiles produced an 18x18 grid and 256 interior
+candidate pairs, completed generation and passed the diagnostic room walk. The
+next case, 152x152 tiles, exited before the harness result with exception
+`0xC0000005` at `DRLGGRID_ReadCell64 0x3FA790`. The last-resort crash stack
+contains return addresses `0x3F5A43` and `0x3F5F09` plus packed coordinate
+pairs beyond the intended local array. The stress case was not attempted. All
+runtime files, plugin inventories and the original Levels table were restored
+with zero restoration errors.
+
+The exact producer is `DRLGTILESUB_TrySecondaryBorderGroup 0x3F5D10..0x3F5FEA`.
+Its 0x888-byte frame stores coordinates at `rsp+0x60` and the stack cookie at
+`rsp+0x860`, so the local capacity is 256 eight-byte X/Y pairs. Width is
+`state.gridRect.width - record.gridSize * group.width + offset`, where offset
+is -1 only for secondary-border mode 1 with the outdoor flags masked by 0xC;
+height is `state.gridRect.height - record.gridSize * group.height + 1`.
+The signed 32-bit product is filled and shuffled without a capacity guard.
+For the 19x19 grid reached by the 152x152 level, the relevant group produces
+289 coordinates and overwrites saved state before the call to 0x3F5930.
+
+The only indexed direct call is 0x3F4F53. It proves the Windows x64 arguments
+`uint8 context`, secondary-border state, LvlSubTxt record and substitution
+group, followed by an AL test. The complete helpers are
+`DRLGTILESUB_TestReplaceSubPreset 0x3F5930..0x3F5B1B` and
+`DRLGTILESUB_ReplaceSubPreset 0x3F5B20..0x3F5D0A`. Their exact bodies establish
+the two stack arguments and the group/record/state fields consumed by the
+replacement. All four ranges are byte-identical in the governed canonical and
+analysis images and have been added to the Large Maps Fix fingerprint.
+
+D2MOO at pinned commit `19019806df7f3e877fa105b05395d1e3597e2316`,
+`source/D2Common/src/Drlg/DrlgTileSub.cpp:18-145`, is semantic corroboration
+only. It independently shows the same `D2CoordStrc[256]`, N two-draw
+transpositions, native helper order, variation draw and the `(2,2)` exclusion
+for small Act I wilderness groups. No D2MOO address, structure offset or
+32-bit ABI is reused.
+
+The correction adds a sixth managed hook at the 17-byte non-RIP-relative
+prologue. N<=256 delegates the original trampoline. Larger products use
+checked arithmetic and private per-invocation coordinates, call the two exact
+native helpers in the original order and preserve the seed evolution and
+return contract. Offline oracle, rebuilt artifact and 144/152/512 gameplay
+results are separate gates.
+
+The rebuilt six-hook artifact is 37,376 bytes, SHA-256
+`9B331F6036BCFB1B0A982F4346C46A779CE0EE3C0DD60814F70D2779F7A129E5`.
+It passes 5,376 existing placement cases, seven secondary-border cases and six
+exact fail-fast children. Fresh mod-local gameplay then passes Rocky Waste at
+144x144, 152x152 and 512x512 source tiles. The observed grids are 18x18,
+19x19 and 64x64; all three room walks report zero invalid geometry, read
+faults, cycles and truncation, and no fresh crash occurs. In particular, the
+152x152 run proves live execution after replacing the 289-pair secondary-border
+array that crashed the superseded candidate.
+
+The same artifact also passes an automap persistence transaction driven through
+D2RLoader's console: `goto 1`, inject 6,000 cells / 36,000 serialized bytes,
+`goto 29`, then `goto 1`. The intermediate layer is 18 and the final verifier
+finds all 6,000 cells with tags `0:0,1:6000,other:0`. Each run uses the complete
+installed plugin stack and all PluginPack features, reaches startup 24/24, then
+restores runtime inputs and isolated test saves byte-exact. The evidence lives
+under `analysis-cache/runtime-validation/large-maps-fix-outdoor-20260907-090100/`
+and `analysis-cache/runtime-validation/large-maps-fix-automap-goto-20260907-093217/`.
+
+A larger transaction replaces that boundary-only Automap proof as the current
+stress envelope. The harness grows the layer-zero tree from 579 to 100,579
+cells, publishes a 600,000-byte payload, observes layer 18, then recovers all
+100,000 cells twice with `tags=0:0,1:100000,other:0`. This is 18.3 times the
+former maximum complete payload of 32,766 bytes, a gain of 1,731.2%. Startup
+reaches 24/24 with all five eezstreet plugins observed; the same two external
+plugin failures keep full-stack coexistence blocked. Runtime inputs, isolated
+saves and candidate files are restored byte-exact and no process remains.
+Evidence is under
+`analysis-cache/runtime-validation/large-maps-fix-automap-stress-100000-retry-20260907-130905/`.
+
+A separate cold start loads and activates the same hash only from the global
+plugin directory after the complete fingerprint passes, then reaches startup
+24/24. Its mod-local diagnostic harness loads first and refuses vanilla bytes,
+so the run proves global discovery and activation without claiming a duplicate
+Automap transaction. Evidence is under
+`analysis-cache/runtime-validation/large-maps-fix-global-automap-goto-20260907-094846/`.
+Explicit normal-path trampoline/unwind proof, managed-install rollback, Steam
+and cross-build multiplayer remain open.
+
+The historical/new automap ownership gate also passes in both load orders in
+the representative mod-local scope. The provider loaded first remains active;
+the second refuses the exact already-modified 13-byte epilogue. Both rounds
+reach startup 24/24, observe all five eezstreet plugins and restore the runtime.
+The first runner's stale log-label predicate reports a false negative, while
+its raw logs contain the expected Large Maps Fix witness refusal; the corrected
+reverse-order run reports PASS. Evidence is under
+`analysis-cache/runtime-validation/large-maps-fix-coinstall-20260907-100655/`
+and
+`analysis-cache/runtime-validation/large-maps-fix-coinstall-new-first-20260907-100814/`.
+
+A bounded promoted-Loader attempt temporarily installed the governed D2RLoader
+1.2.1 artifacts. Large Maps Fix passed its complete fingerprint, became active
+and startup reached 24/24, but the UI driver never acquired the game window and
+sent no gameplay input. No outdoor harness result exists, so the run is
+inconclusive rather than a promoted-baseline qualification. The same two plugin
+failures remained present, including the eezstreet Misc Native Hook capability
+refusal. The original Loader candidate files and all test inputs were restored
+exactly, no restoration error occurred and no process remained. Evidence is
+under
+`analysis-cache/runtime-validation/large-maps-fix-loader-1.2.1-20260907-101525/`.
+
+### Multiple Item Auras — isolated periodic-event identity — 2026-09-07
+
+The current TXT contract already permits multiple distinct aura layers on one
+item. Property function 22 writes `STAT_ITEM_AURA` with the skill ID as layer,
+and the governed item-aura lifecycle keeps 20-byte records distinguished by
+item GUID, aura state and skill ID. The limiting collision is in the periodic
+event identity, not in `properties.txt`, `itemstatcost.txt` or the save format.
+
+`SKILLITEM_ActivateItemAura 0x581970` has observed Windows x64 ABI
+`void(game, owner, sourceGuid, skillId, skillLevel)`. It deletes a type-9 event
+by `sourceGuid` at `0x581A20`, then calls `EVENT_SetEvent 0x48B720` at
+`0x581A68` with `sourceGuid` in stack argument 5 and `skillId` in argument 6.
+`SKILLITEM_DeactivateItemAura 0x581AE0` has ABI
+`void(game, owner, sourceGuid, skillId)` and deletes type 9 by the same source
+at `0x581BB6`. Both 32-byte entries and both argument blocks are exact and
+unique in the verified common corpus.
+
+`EVENT_Delete 0x48B890` captures event type from R8D and `customId` from R9D.
+The exact predicate at `0x48B909` compares timer type at +0, skips the identity
+filter only when the requested ID is zero, otherwise compares only timer+0x18,
+and deletes every match. It never compares timer+0x1C. Conversely, the timer
+executor witness at `0x48C545` passes type in R8D, +0x18 in R9D and +0x1C as
+stack argument 5 to the callback. This independently proves that `customId`
+and `customParam` remain distinct through the D2R event ABI.
+
+The item-aura lifecycle has exactly two direct activation calls, at `0x47055A`
+and `0x470607`, and two deactivation calls, at `0x470807` and `0x4711FD`.
+The existing-record branch immediately calls `EVENT_Delete` at `0x47056E` and
+`EVENT_SetEvent` at `0x470591`. All six five-byte calls are unique. No writer
+for these ranges exists in the current RuffnecKk Suite or pinned eezstreet
+PluginPack tree; the shared event functions themselves remain owned by no new
+hook in this workstream.
+
+D2MOO at commit `19019806df7f3e877fa105b05395d1e3597e2316` provides semantic
+corroboration only. `ItemMode.cpp:269-274` forwards item GUID, skill layer and
+level; `SkillItem.cpp:959-1005` schedules and removes the periodic event by the
+source argument; and `Skills.cpp:2812-2831` relays that source only to event
+deletion/rescheduling while looking up `STAT_ITEM_AURA` by `skillId`. No D2MOO
+address, 32-bit structure layout or ABI is reused.
+
+The Multiple Item Auras 1.0.0 candidate therefore redirects only the six
+callers and substitutes a stable negative source token keyed by
+`(game, owner, itemGuid, skillId)`. Skill ID remains in `customParam`. Five
+near absolute-jump relays are made writable only while populated and are then
+changed to execute/read before D2RLoader reserves the six `CALL rel32` ranges.
+The active registry is fixed at 1,024 entries; exhaustion delegates the
+affected aura to native behavior with one warning. A process singleton rejects
+duplicate global/mod-local installation.
+
+Fifteen governed ranges and all six original call targets pass against both
+the canonical and analysis images. Two independent MSVC 19.44 Release x64
+`/W4 /WX` builds pass CTest 1/1 and are byte-identical at 66,560 bytes,
+SHA-256 `196443D154B3CABCC49A5668C36EDA36CB89CF75C4890F4BB583E19F65B4AAAD`.
+The PE is AMD64, carries manifest API 3 and version 1.0.0, and exports exactly
+the three D2RLoader lifecycle functions. Runtime loading, opaque-token behavior
+in the current D2R callback, the two-aura fixture, lifecycle, full-stack
+coexistence and multiplayer remain separate gates; no D2R process was started
+for this static proof.
+
+### PlayerX Scaling Tweaks — independent baseline, caps and NoDrop party simulation — 2026-09-07
+
+`GAME_GetPlayerCountBonus 0x542F40` has a unique 32-byte entry and observed
+Windows x64 ABI `void(game, int32 output[5], room, monster)`. The native output
+stores HP and XP bonus percentages at indices 0 and 1, difficulty-derived skill
+bonus and difficulty at indices 2 and 3, and the monster player-count stat at
+index 4. Counts 1..8 select the native 0..350 table in 50-point steps. The exact
+extension at `0x543083` calculates HP as `(count-2)*50` and XP as
+`(count+26)*10`. Exact contexts at `0x54306E` and `0x5430D6` govern all five
+output stores. The eligibility chain at `0x542FFF..0x543025` loads
+`monster+0x10`, its record pointer and the byte at `record+0x87`; a nonzero
+value branches to `0x543098`, keeps HP/XP at zero and stores count 1. D2MOO
+semantically identifies this as the non-evil-alignment exemption. The PlayerX
+Scaling Tweaks candidate calls the function first, returns without rewriting invalid
+or non-evil outputs, and applies its baseline only to eligible hostile
+monsters. Direct native reads are preceded by committed-readable-page checks.
+
+The pinned PluginPack's `/players` implementation is also confirmed against
+the common corpus. The unique calls at `0x18885B` and `0x18887F` target the
+numeric parser `0x12DA3A4` and setter `0xD2F020`. Redirecting these two calls
+captures the raw request before the vanilla ceiling and applies a configurable
+minimum and maximum without replacing the rest of the command handler. These
+sites overlap the old BKVince player-difficulty patch and PluginPack's optional
+limit hook, so exactly one owner is required at runtime.
+
+D2R does have player-count monster offense scaling. At `0x588EF8`, the exact
+unique context calls `STATLIST_GetUnitStat 0x2F5020` for stat 100. Counts 2..8
+select the table `0,0,8,16,24,32,40,48,56`; counts above 8 use
+`8*count-16`. At `0x589156-0x589190`, the resulting factor scales physical
+minimum damage, maximum damage and Attack Rating together by
+`(128+factor)/128`. The surrounding difficulty gate preserves the native
+Nightmare/Hell-only behavior. A count-only hook can therefore cap this whole
+offense channel, but cannot truthfully claim to affect physical damage without
+Attack Rating; the public TOML states that coupling explicitly.
+
+The NoDrop core begins at `0x4404F0` and is called by
+`TREASURECLASS_GenerateDrops` at `0x44148C`. The block
+`0x440A1D-0x440B48` resolves living party members in the same level, bounds
+them to 1..8, calls `PLAYER_GetPlayerCount 0x4251E0` at the unique callsite
+`0x440A7D`, and computes `nearby + (players-nearby)/2`. If a monster source is
+present it then caps that effective value by stat 100. The floating-point block
+raises the NoDrop ratio to the effective count before recomputing the integer
+NoDrop weight. Consequently solo `/players 4` yields effective count 2, while
+four living nearby members of the same party yield 4 and are more generous.
+
+D2MOO commit `19019806df7f3e877fa105b05395d1e3597e2316` corroborates the
+offense and NoDrop meanings in `MonsterMode.cpp` and `Items.cpp:2124-2185`.
+No address, structure or 32-bit ABI is transposed. The PlayerX Scaling Tweaks wrapper
+at `0x440A7D` preserves the native function and probability block. Its final
+public policy leaves both sources untouched by default; when the explicit
+party-simulation option is active, it raises the nearby-party stack slot to the
+greater of the observed player count and the real nearby count. A second
+callsite wrapper at `0x440AC1` raises only the local stat-100 cap to the
+effective count already present in that stack slot while simulation is active.
+Thus the general monster count cannot silently undo the simulated nearby-party
+result; the persistent stat, native clamp and floating-point probability block
+remain unchanged. Both fixed stack offsets follow directly from governed
+callsite contexts and are part of the fail-closed fingerprint.
+
+Seventeen governed witnesses, all five direct call targets and their ABI
+contexts match the canonical image. Two independent MSVC 19.44 Release x64
+`/W4 /WX` builds pass CTest 1/1 and produce the same 194,048-byte DLL, SHA-256
+`8895584E654EF0F84913D7F0B3F9788B58E2AA83C59FC5D56BAAF03E83F262A2`.
+The PE is AMD64, embeds PluginSDK API v3 and version 0.1.0, and exports exactly
+the three D2RLoader lifecycle functions. No runtime was started. Collision
+removal, cold start, command behavior, HP/XP/offense measurements, NoDrop odds,
+scope and multiplayer remain separate gates.
+
+### PlayerX Scaling Tweaks — Battle.net simulation authority — 2026-09-08
+
+The unique dispatcher context at `0x188833` proves that the conditional jump
+at `0x188835` enters the `/players` handler only after the command string has
+matched. Replacing `75 63` with `EB 63` takes the existing next-command path at
+`0x18889A`; parsing, the native stronger/weaker message and the player-count
+setter are not reached. The mutation is conditional on
+`battle-net-simulation.enabled = true`.
+
+`PLAYER_GetPlayerCount 0x4251E0` enumerates the live player count into `EDX`.
+For the three observed modes selected by `game+0x101`, its native tail at
+`0x42521C` loads the artificial Offline Difficulty global at `0x2AA6A30` and
+returns the larger value. The approved patch changes only that six-byte load
+to `mov eax, edx` plus four NOPs. The separately attested tail at `0x425222`
+remains `cmp eax,edx; jg 0x425226; mov eax,edx`; this preserves the branch
+target used by other modes and returns the enumerated count on every path.
+
+The primary Offline Difficulty initializer at `0x346ED` and secondary one at
+`0xE1A09` both construct a range 1..8 and current value 1; their fallback
+descriptors at `0x3474E` and `0xE1A57` carry the same maximum. The conditional
+patches make each range 1..1. To handle an object initialized before plugin
+load, the unique secondary getter `0xE19E0`, its return at `0xE1A2F`, and the
+native getter-to-setter chain at `0x188874` prove
+`GetOfflineDifficultySecondary()` followed by
+`SetPlayerCount(object,count)`. The entry and argument-transfer context of
+`0xD2ED90` independently prove
+`SetOfflineDifficultyRange(object,minimum,maximum)` in `RCX/EDX/R8D`.
+Therefore the enabled OnLoad path can set range 1..1 and current value 1
+before becoming operational without claiming an object layout.
+
+The governed PlayerX Scaling Tweaks fingerprint now contains thirty byte-exact
+witnesses. The plugin uses a `Shared | NativeHooks` role because the option
+changes both a local control and gameplay authority. Static proof establishes
+an immobile p1 control, not visual greying or hiding. Cold start, connected
+player scaling, host/joiner behavior and full-stack coexistence remain runtime
+gates.
+
+## MapProbe ptWarp predicate and passive capture limits — 2026-09-08
+
+`mapprobe-warp-runtime.py` composes the existing read-only WindowsReader and
+StableReads. Its client fingerprint covers 31 canonical witnesses; the optional
+server-global route adds `SERVER_GetUnitByIdAndType@0x9A5A0[28]`. No game
+function is invoked and no room is initialized by this observer. Canonical and
+live byte checks precede pointer traversal; two matching read passes are not an
+atomic snapshot guarantee. Dynamic Vis/Warp overrides are observed separately
+from the unobserved native LevelDef fallback and external TXT expectations.
+
+The `0x3F44C0[70]` interior witness proves the predicate leading to the
+`ptWarp` assertion at return `0x3F4515`: match the style-selected Warp ID
+against `RoomTile+0x20 -> LvlWarp+0x2C`, following RoomTile next at `+0x08`.
+The node enabled field and destination are separate qualifications. The room
+builder at `0x328FE0` calls `0x3608A0` only when the dword near-count at
+Room+0x18 is zero; `0x3608A0[88]` tests room flags `+0x50`, mask `0xFF0`,
+starting slot zero at `0x10`. These are static conditions, not an execution
+trace proving which condition failed in the server room.
+
+The bounded MapProbe PID 20624 session used hash-verified D2RLoader 1.2.1 and
+retail D2R 3.3.93847. Before `goto 138` and at its unsuppressed `ptWarp` modal,
+the client DRLG had dynamic level109 Vis0=138/Warp0=83, 25 town room
+descriptors, no flag0x10 or RoomTiles, and no allocated Level138. The marker's
+client room `(5000,5080,40,40)` was already active with nearCount=9. These
+client observations cannot establish missing asset resolution or the contents
+of the server room which asserted. The global server-player bucket lacked
+the local GUID 1 and was refused. A separately fingerprinted read of the
+client Unit+0xD8 field yielded `0x401`, refused as a pointer and never followed.
+It is not a qualified client-to-server Game anchor.
+
+All 11 focused tests pass; client policy is
+`D9D2BF68A3886F4CBE1423CF57B85BDA3BB0403D9C9636796891F153C610B56C`,
+server-global policy is
+`E5011CA297B628AC979F6ADC95593C71170BFDEE3A5502F38019CE2D0412A61D`.
+Evidence is under `analysis-cache/d2r-map-editor/warp-link-analysis-002/`.
+TACT was suppressed for this session only to reach the diagnostic, so clean
+startup remains unqualified. Exit produced a crash report; the original
+MapProbe profile and all 60 protected runtime hashes were restored, the
+temporary save removed, and the runtime lease released. No server-room
+root cause, standalone render/collision success or native patch is claimed.
+
+## MapProbe authoritative Game anchor and loaded DS1 witness — 2026-09-08
+
+The subsequent `server-anchor-003` experiment supersedes the missing server
+anchor limitation above. The reader enumerates the 256 D2Client bucket heads
+at RVA `0x2AAECA0`, follows `D2Client+0x630`, validates the unique local player
+identity, and obtains `Game*` from `D2Client+0x2B0`. It checks Game membership
+through `Game+0x138` / `D2Client+0x628`, context agreement at `Game+0x106` /
+`D2Client+0x6B0`, then resolves the player from
+`Game+0x2230+(GUID&0x7F)*8`. The resolved server unit must backlink to Game
+through `Unit+0xD8`; the client-copy sentinel `0x401` is not followed.
+The remaining room-to-DRLG chain uses existing governed MapSense witnesses.
+
+Exact canonical witnesses, ABI/dataflow notes and range hashes are retained in
+`analysis-cache/d2r-map-editor/server-anchor-003/sol/witnesses.json` and
+`sol/native-findings.md`. The source reader embeds these native checks and
+requires a matching canonical audit plus live byte checks before dependent
+reads. Current server fingerprint:
+`1A4609579228FC393B8EB16768F3D78BE55704102D20A3209A086FEF3E77ABED`.
+
+PID 47804 captured the authoritative server at 13:12:11 UTC under D2RLoader
+1.2.1 and D2R 3.3.93847. Harrogath's 25 rooms have no expected warp link;
+Level 138 is allocated without rooms before transport. The loaded preset
+chain identifies Def 863, File0, Scan1, Pops1, filename
+`data\global\tiles\Expansion\Town\townWest.ds1`, logical 40x40 dimensions
+and four wall layers. This is the selected native filename, not proof of the
+absolute file source. Layer arrays and cells use eight-byte strides; LvlPrest
+records need only four-byte alignment. At (7,16), layer zero is orientation 0 /
+wall 0x84 in memory versus orientation 11 / wall 0x81 in the deployed DS1.
+Layer one also changes wall bits (0xE01981 -> 0xE41981). Native transformations
+must be examined before claiming an asset-resolution mismatch.
+
+The initial 26 reader tests and canonical audits pass on resumption. Review
+then hardened the player-bucket traversal to reject duplicate matching GUIDs
+or a cycle after the first match. Three additional tests cover both sides and
+a valid distinct-GUID collision; all 29 pass. This hardening has no new runtime
+capture and does not retroactively assert uniqueness of uncaptured bucket tails.
+PID 38832
+already reproduced ptWarp in the first run; the second goto was cancelled
+before execution. TACT suppression remains session-only and clean startup is
+not qualified. Rollback is verified at 60 protected hashes and three MapProbe
+files, temporary save absent, zero processes and lease released at 13:19:32
+UTC. The asserting target room, root cause and standalone correction remain
+open. No native function call or process-memory write was used by the reader.
+
+## MapProbe retained source header and aliased wall writers — 2026-09-08
+
+Static native dataflow now explains part of the difference between raw DS1
+cells and the server capture. Room-type-2 dispatch at `0x3F3906` enters
+`0x3DE420`. Its subgrid helper `0x3FA8A0` assigns an address within the cached
+DS1 qword array directly to `Grid+0x18`, allocating only row offsets. The wall
+grids therefore share the DS1 cells. The room initializer applies edge helper
+`0x3FA030` with OR mask `0x84` to wall layer zero and all-cell helper
+`0x3FA990` with OR mask `layer << 18` to subsequent wall layers. The operation
+is the governed four-byte leaf at `0x3F9FE0` (`OR [RCX], RDX; RET`).
+
+This exactly explains layers 1 through 3 in the earlier server sample. It
+cannot produce layer-zero wall `0x84` from exported `0x81`, since the result
+would be `0x85`, and it does not modify orientation cells. The complete
+BuildPresetArea tail `0x3E0E2D..0x3E1239` also only reads these source arrays.
+The old orientation conversion table is skipped for versions >=7 at
+`0x3DFF8E/0x3DFF98`; its 11-to-0 mapping cannot explain this v18 file.
+These bounded paths do not exclude a different writer elsewhere.
+
+The loader retains a separate raw-file allocation at `DS1+0x08`. Allocation
+and memcpy are bound by `0x3DFDC2[95]`; v18 header consumption by
+`0x3DFE21[98]`; final release by `0x3DF930[219]`. Their exact bytes and hashes
+are embedded in `mapprobe-warp-runtime.py` and recorded in known-rvas.json.
+The observed DS1 layout retains no allocation byte count. Consequently the
+new `rawDs1Header` observer reads four version bytes, then exactly twenty more
+only for supported v18, verifies dimensions against the native object, bounds
+act/substitution/dependency count, and hashes only those 24 bytes. Unsupported
+versions and missing buffers do not permit dependent reads. Complete-file
+identity, allocation extent and physical source remain explicitly unobserved.
+
+The local vanilla header is `(18,40,40,4,0,24)` and the staged export header
+is `(18,40,40,4,0,29)`. This distinguishes their retained headers without
+relying on transformed wall grids or proving complete-file equality.
+All 34 reader tests pass and independent review has no remaining finding.
+Current canonical server policy:
+`84E777D3E05DE9B1ACEC4CA70DBD6C9F1A5B532F2C444388AAE3A1251B7749D7`,
+receipt `analysis-cache/d2r-map-editor/marker-origin-004/server-audit-v2.json`.
+Earlier captures and policy hashes remain historical observations; the new
+reader revision is covered by the separately authorized retry below.
+
+The subsequent single MapProbe launch, launcher PID 54036 at 13:54:04 UTC, loaded 23
+plugins under the hash-verified D2RLoader 1.2.1 / D2R 3.3.93847 runtime. After
+session-only TACT recovery, the user's goto reproduced ptWarp at 13:54:52 UTC
+with the same return RVA `0x3F4515`, followed by Exit. The observer targeted the
+launcher PID rather than its unresolved game child, producing
+`REFUSED: OpenProcess failed: 87`. Exit alone therefore does not explain the
+failed observation. Neither 24-byte candidate header occurs in the retained
+1,548,925-byte minidump; omitted heap pages cannot be inferred from this absence.
+All 92 newly snapshotted protected hashes and the three original profile files
+match after rollback; the disposable save was removed from runtime and the
+lease released at 13:56:30 UTC. Evidence: `marker-origin-004/runtime/` beneath
+the local Map Editor cache.
+
+The authorized retry captures game PID **34732**, parent launcher **1780**, at
+**2026-09-08T14:14:44Z**, with current policy `84E777D3...7749D7` and two
+matching read passes. Native seed is **1381948177**, difficulty **2 (Hell)**.
+The town preset 863 retains header **(18,40,40,4,0,24)**, SHA-256 of 24 bytes
+`2A4B00D712FA8CDFE64E9DB1F0C9CB1D009408E5D784BFA56ADE921C34EE6500`.
+Independent disk reads equal the stock witness and differ from the deployed
+export **(18,40,40,4,0,29)**, first-24-byte SHA-256
+`5F1714EF4863729346B02809BE97C2445A6B1AABFFBF6E0D227917C59E4877EB`.
+These fixed-24-byte hashes must not be compared with the older full variable
+header hashes (1222 and 1380 bytes) in `offline-marker-witnesses.json`.
+
+The 25 room references share this DS1: one independent file observation.
+Complete-file identity and physical source remain unobserved. The result directs
+investigation toward source selection without proving a resolver/cache defect.
+The same four marker layer values recur; Level 138 is allocated without rooms.
+Intervening user actions and Hell difficulty prevent treating this as a repeat
+of the earlier Normal transport trial. No goto 138 was issued by the agent and
+no ptWarp fix is claimed. Evidence: `marker-origin-004/runtime-retry-001/`:
+`server-town-header.json` SHA-256
+`EB44C7E86DAEEFAA1A3EE39241B984589BE74BC72138B38A20E07320BA506BC2`,
+`header-comparison.json` and `game-process.json`.
+
+All 23 plugins loaded; session-only TACT recovery still prevents clean-start
+qualification. Graceful shutdown produced no new crash. Original MapProbe files
+were restored and the temporary save archived; 91/92 protected files match.
+Only the game's `imgui.ini` geometry update remains, explicitly disclosed by
+`rollback-receipt.json`. No game process remained at cleanup; lease released at
+14:19:55 UTC. No native call or process-memory write was performed by the probe.
+
+Full native range hashes and the offline file comparison are retained under
+`analysis-cache/d2r-map-editor/marker-origin-004/`, especially
+`sol/native-room-grid-writer.json`, `raw-proof/witnesses.json` and
+`offline-marker-witnesses.json`. D2MOO commit
+`19019806df7f3e877fa105b05395d1e3597e2316`,
+`source/D2Common/src/Drlg/DrlgPreset.cpp:990-1033`, corroborates the grid
+algorithm semantically; no D2MOO address, offset or 32-bit ABI is transposed.
+
+### MapProbe: omitted combined DS1 packs, controlled correction (8 September)
+
+Static source-resolution evidence identifies a path-only parsed DS1 cache at
+0x3DCF10 and a preloaded package lookup at 0x3E1260, called by the fresh parser
+before the general resource manager. A nonzero package result at 0x3DFBB8 skips
+that manager. Full bounded range hashes and the limits of this static proof are
+in `analysis-cache/d2r-map-editor/source-resolution-006/sol/native-ds1-source-resolution.json`
+(SHA256 `2B9CD425A89C197F60AC39FCAFB170966604FC4F024255B178B680E33A15C683`).
+No additional native hook, pointer read or process write was implemented.
+
+Before correction, game PID36272 opened expansion/combined_ds1.bin at 6,834,144
+bytes; its retained town header had 24 strings and no expected town RoomTile.
+At ptWarp, Countess had 16 rooms and its orientation-11 marker, but no completed
+expected link. BKVince already provides zero-byte combined_ds1.bin overrides;
+the sparse MapProbe builder had omitted them. Adding only the act1 and expansion
+overrides leaves the previous ten diagnostic payloads byte-identical.
+Both overrides were added together; only the expansion pack is explicitly
+opened in this run. The individual necessity of the act1 override was not isolated.
+
+After correction, PID36524 (launcher35784), Hell seed1381948177, opens the empty
+expansion pack and then townWest.ds1 individually at 76,640 bytes. The same
+qualified passive observer now obtains the export's 29-string header and an
+enabled 109/83-to-138 link. After Vincent's successful goto138, the next capture
+also observes enabled 138/8-to-109. Vincent confirms return through the stairs.
+The full 23-plugin stack remains active and ptWarp is not ignored. Known TACT
+suppression is explicit and scoped to MapProbe; it is not a new native fix.
+
+Comparison receipt: `analysis-cache/d2r-map-editor/preload-007/runtime-001/cache-bypass-comparison.json`,
+SHA256 `5D0A5153008D54692ACE239BCCD798C2F6D56A990B1D705F44B9DCE553E6DC5A`.
+Arrival capture: `server-after-goto.json`, SHA256
+`6399B84BF8C4F0DDB8548412776D9F549C732030D11CAAB1114FCDD285E9B3D0`.
+This controlled result supports the omitted pack override as the cause of the
+observed standalone transport failure. It does not establish a complete-file
+runtime hash, other difficulties, the edited wall's collision or multiplayer.
+The game remains available for Map Editor work; runtime restoration is pending.
+
+## MapSense GPS: isolated CollMap lifecycle helpers
+
+The common 92777/93847 image identifies the two grid-only helpers required by
+the steady-state collision experiment. `COLLISION_FreeRoomCollisionGrid` at
+`0x363A10` has observed Windows x64 ABI `void (ActiveRoom*)`. It obtains
+`ActiveRoom+0x38` through the governed getter at `0x2EFB30`, releases only that
+allocation through the common D2R allocator and stores null through the
+one-field setter at `0x2F0540`. Its logical body is `0x363A10..0x363A89`, 121
+bytes, SHA-256
+`5B152D1381E40E5188F315901947860BD4406B7ABF1CB0CB670AF7A79DFC4571`.
+The exact core witness at `0x363A32`,
+`E8 F9 C0 F8 FF 48 8B F8 48 85 C0 75 1E`, is unique in `.text`. Both direct
+callers, `0x2EF7CB` and `0x2F021B`, are inside complete ActiveRoom teardown
+paths; the helper itself does not unlink rooms, neighbours or units.
+
+`COLLISION_AllocRoomCollisionGrid` at `0x363A90` has observed Windows x64 ABI
+`void (ActiveRoom*)`. It copies the room coordinates, allocates and zeroes an
+inline `uint16` grid, stores it through `0x2F0540`, then walks the complete
+ActiveRoom neighbour list. For each neighbour it obtains that room's grid and
+stamps floor, wall and roof tiles into the new target grid. Its logical body is
+`0x363A90..0x363C63`, 467 bytes, SHA-256
+`3C4B038AC5C41919F3BD11362A6B9C57B1EFA4D573921CCABB024C1380C87481`.
+The wildcarded 32-byte entry
+`40 57 48 81 EC 80 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 68 48 8B F9 48 85 C9 75 1C`
+is unique in `.text`. Its only direct call is `0x2EF498`, after ActiveRoom and
+near-room construction and immediately before the act callback.
+
+This closes the RVA, signature, ABI, allocator and callsite identification for
+the isolated grid lifecycle. It does not yet authorize a live rebuild. Freeing
+and allocating a room grid discards dynamic collision occupancy until the
+corresponding unit/object contributors are restored. The governed corpus also
+does not yet establish an execution point that excludes concurrent readers of
+`ActiveRoom+0x38`. A fail-closed capture must therefore preserve the original
+grids byte-for-byte or run before dynamic occupancy, prove exclusive ownership
+for the complete transaction, abort on session drift and publish no pointer
+outside that transaction. Until those conditions are met, the existing
+read-only GPS captures remain `INCONCLUSIVE` and neither helper is invoked.
+
+D2MOO commit `19019806df7f3e877fa105b05395d1e3597e2316`,
+`source/D2Common/src/D2Collision.cpp:147-185,302-314`, corroborates the semantic
+split between allocation and release. No address, offset or 32-bit ABI is
+transposed from that reference.
+
+### Shadow-ActiveRoom dependency closure
+
+The clone-only implementation closes the helper's transitive layout boundary
+rather than relying only on the allocator body's relative calls. The complete
+38-byte `DUNGEON_GetActiveRoomCoordinates` body at `0x2EFB40` binds
+`ActiveRoom+0x80/+0x90`; the complete 13-byte room-list accessor at `0x2EFDE0`
+binds pointer `+0` and count `+0x40`. The 41-byte witness at `0x2EF36E` passes
+0xB8 to both the ActiveRoom allocator and its zero-fill call.
+
+The floor, wall and roof accessors are independently bounded and hashed:
+`0x2EFB70..0x2EFBE3` (116 bytes,
+`BFA9E1003CFCCEAF3D8AEBEA920F8BA9297A79850711C4EC5EE0B401DBEA61A1`),
+`0x2EFDF0..0x2EFE40` (81 bytes,
+`E06C0460453AC975715BB2CCBC8883C149E5E557A56875EB9D49A92D59C0FAAE`),
+and `0x2EFD30..0x2EFD81` (82 bytes,
+`E41FE844F0E10C2488D9732C8E8D6EF2025CA2DB9E5B36D89885B15545BF4AFA`).
+The shared stamper at `0x365520..0x36576C` is 589 bytes, SHA-256
+`C25561F2B8BD2710F562BB4D3835C5BC327C5C19C0F650173E164B75FB8644E1`.
+It reads retained neighbour CollMap coordinates directly, while its downstream
+geometry operations receive the private target CollMap, local coordinates or
+tile assets. No live ActiveRoom or live CollMap is forwarded as a write target.
+
+The MapSense diagnostic fingerprints these bodies plus the CollMap field
+witnesses at `0x36697B` and `0x3669E6`. It also validates copied dimensions and
+the remaining cell budget before calling the native allocator. This proves the
+clone extent, fields and clone-only write path required for a diagnostic build;
+the separate runtime qualification and comparison remain open.
+
+## MonCurseCast five-effect selector — static identification
+
+The logical routine at `0x5794B0..0x57975E` mutates both words of the caster
+seed, calculates a remainder of five, and indexes int32 skills at `0x1D3E798`.
+It passes the selected skill to the governed Skills getter `0x97790`.
+The resulting record supplies target state `+0xA2`, range `+0x84`, duration
+`+0x80`, and Decrepify Param7 `+0x1D0`. Thus changing only the MonCurseCast
+input skill record does not necessarily change these effects. This differs
+from D2MOO's historical six-choice routine and input-record lookup.
+
+The index separately selects fixed effect construction: Amplify Damage,
+Weaken, Life Tap events, Decrepify, or Lower Resist. The common enumeration
+uses filter 3 and callback `0x55A7E0`; this callback consumes a preconstructed
+payload. SrvDo30 instead builds its payload from Skills fields and uses
+`0x55AC40`. Replacing one handler with the other is not a vanilla-equivalent
+way to expose an arbitrary curse list.
+
+The proposed editable selector therefore separates `skill` from `effect`,
+with one of five supported templates, plus row identity and selection weight.
+Row ordering must not implicitly change the template. More general custom
+effects need their own contract; none is implemented by this finding.
+
+Body SHA256: `A7A38F384FFA91D277760D9D6C3CBF78BC6819C735BE5EB163C572AF8EE9DE93`.
+Evidence: `plugin-dev/bind-demon-auras/experiments/bind-demon-auras/native/moncurse-selector-evidence.json`,
+SHA256 `E0FAEA7D79FEA2EC154D46B1CE03E6D61E52F9835463CBE3EAFF9FF5923046A9`.
+Semantic correspondence to documented SrvDo112 is strong, but the live
+dispatcher slot and the five pool values were not read. The pool is not
+file-backed in the analysis image. PDATA fragments are not the logical body
+boundary, and no hook, unwind, active-provider or gameplay qualification is
+claimed. The two new registry entries retain medium confidence for these limits.
+
+### 2026-09-20: Stack Manager PD2 input and native duplication boundary
+
+See `plugin-dev/stack-manager/pd2-stack-controls-investigation.md` for the full
+binary identities, exact entry witnesses, commands and six local oracle cases.
+The modern held-item branch at `0x2C817E` invokes `0x2C81D0` with the widget
+and two-dword cell-coordinate pointer. Its empty destination delegates to
+`0x2C6070`; an occupied compatible destination uses native compatibility
+`0x375960`. No Ctrl-click hook or universal storage coverage is claimed.
+
+The logical duplicate wrapper `[0x43D660,0x43D8FB)` is 667 bytes with SHA-256
+`91B0A5FF0BF4E1A8425DC75C7D939D3B64A3533B748E8B0325C4838F02C04801`.
+Its Win64 return is an item pointer, despite the decompiler's inferred void
+return. The wrapper does not split quantity. An exact-byte local oracle with
+all 21 external calls replaced by synthetic probes demonstrates that failed
+child creation returns null without wrapper cleanup of the created parent;
+failed child attachment can continue after a nonbreaking assertion; and zero
+serialization still reaches parser/loader. These findings block treating the
+wrapper as an atomic arbitrary-item splitting API. They do not demonstrate a
+live game leak or verify native serialization/property preservation.
+
+The existing `ITEMS_PlaceItemForPlayer` name at `0x471500` must not be read as
+an ABI: the item-grant call at `0x5176B9` passes `(actor, states, itemIds, 1,
+false)`. The subsequent publication call is `(game, actor, item, 1, 2, mode,
+page, nodePage, packedXY)`, then attachment/refresh work. A future split adapter
+must qualify that entire transaction and each storage owner's admission rules.
+
+### 2026-09-20: Cast Triggers finalized-block observation seam
+
+`D2GAME_ReportFinalizedDamage` has logical bounds `0x451FB0..0x4521BA` and the
+observed ABI `void(game, attacker, defender, damage)`. Its strict 33-byte entry
+is unique in the governed corpus. The sole direct caller is FinalizeDamage at
+`0x44AA1F`, with return address `0x44AA24`; the call follows the admission
+witness at `0x44A9BD`, which rejects failed damage permission and a dead
+defender before reporting.
+
+The result-layout witness at `0x44AE13` reads the word at `damage+4`, rejects
+Dodge/Avoid/Evade mask `0x0380`, then tests BLOCK/WEAPONBLOCK mask `0x8010`.
+Earlier resolver flow clears the successful-hit bit when a defensive result is
+selected. The general missile path can normalize Weapon Block to BLOCK, so the
+final record safely supports inclusive confirmed-block observation but cannot
+support a shield-only public contract.
+
+The Cast Triggers candidate conditionally hooks only the reporter entry, calls
+the original once, validates the exact native return site and dispatches a
+defender-owned `doactive` stat toward the incoming attacker. It does not hook
+FinalizeDamage broadly, rerun admission, modify the damage record or depend on
+block animation. This is static/build evidence for D2R 3.3.93847; gameplay,
+coexistence, persistence and multiplayer qualification remain open.
