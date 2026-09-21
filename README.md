@@ -2,8 +2,12 @@
 
 
 
-Suite 1.4.1 will contain 22 independent plugins and 18 optional memory patches.
+Suite 1.4.2 contains 22 independent plugins and 18 optional memory patches.
 You can install one component, a few favorites, or the complete bundles.
+
+This is strictly a MapSense update. All other components remain unchanged from
+Suite 1.4.1. MapSense 2.0.2 improves saved settings, quest navigation and custom
+destination instructions; see [the changelog](CHANGELOG.md).
 
 ## Requirements
 

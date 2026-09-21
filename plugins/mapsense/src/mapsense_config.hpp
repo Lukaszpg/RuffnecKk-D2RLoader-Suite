@@ -24,7 +24,7 @@
 
 namespace RuffnecKk::MapSense {
 
-inline constexpr std::int64_t CurrentConfigSchemaVersion = 18;
+inline constexpr std::int64_t CurrentConfigSchemaVersion = 19;
 
 inline constexpr float MinimumMonsterMarkerSize = 3.0F;
 inline constexpr float MaximumMonsterMarkerSize = 40.0F;
@@ -463,6 +463,7 @@ struct MenuOptions {
 
 struct Config {
     bool enabled{true};
+    bool revealMap{};
     bool diagnostics{};
     OverlayOptions overlay{};
     MonsterOptions monsters{};
@@ -1286,7 +1287,10 @@ inline auto ParseConfig(const toml::table& root) -> Config {
         config.monsters.superUniqueBoss.shape = MonsterMarkerShape::X;
     }
     if (const auto* general = ReadOptionalTable(root, "general")) {
-        if (*schemaVersion >= 16) {
+        if (*schemaVersion >= 19) {
+            RejectUnknownKeys(*general, {"enabled", "reveal_map"}, "general");
+            config.revealMap = ReadOptional(*general, "reveal_map", false);
+        } else if (*schemaVersion >= 16) {
             RejectUnknownKeys(*general, {"enabled"}, "general");
         } else if (*schemaVersion >= 12) {
             RejectUnknownKeys(
@@ -1325,8 +1329,8 @@ inline auto ParseConfig(const toml::table& root) -> Config {
             *overlay, "diagnostic_preview", config.overlay.diagnosticPreview);
         config.overlay.followNativeAutomap = ReadOptional(
             *overlay, "follow_native_automap", config.overlay.followNativeAutomap);
-        config.overlay.startMenuOpen = ReadOptional(
-            *overlay, "start_menu_open", config.overlay.startMenuOpen);
+        // Accept and validate the legacy key without reopening the menu.
+        (void)ReadOptional(*overlay, "start_menu_open", false);
         config.overlay.opacity = ReadOptionalFloat(
             *overlay, "opacity", config.overlay.opacity, 0.10F, 1.0F);
         config.overlay.scale = ReadOptionalFloat(
@@ -1610,8 +1614,8 @@ inline auto ParseConfig(const toml::table& root) -> Config {
         }
         config.menu.showLauncher = ReadOptional(
             *menu, "show_launcher", config.menu.showLauncher);
-        config.menu.startExpanded = ReadOptional(
-            *menu, "start_expanded", config.menu.startExpanded);
+        // Panel visibility is session UI state, never a saved preference.
+        (void)ReadOptional(*menu, "start_expanded", false);
         config.menu.rememberPosition = ReadOptional(
             *menu, "remember_position", config.menu.rememberPosition);
         config.menu.positionX = ReadOptionalFloat(
@@ -1720,7 +1724,8 @@ inline auto SerializeConfig(const Config& config) -> std::string {
         << "# Changes made in the MapSense menu are saved here.\n\n"
         << "schema_version = " << CurrentConfigSchemaVersion << "\n\n"
         << "[general]\n"
-        << "enabled = " << config.enabled << "\n\n"
+        << "enabled = " << config.enabled << "\n"
+        << "reveal_map = " << config.revealMap << "\n\n"
         << "[overlay]\n"
         << "diagnostic_preview = " << config.overlay.diagnosticPreview << "\n"
         << "follow_native_automap = " << config.overlay.followNativeAutomap << "\n"
@@ -1892,8 +1897,15 @@ inline auto SerializeConfig(const Config& config) -> std::string {
         << "line_mode = \"" << NavigationLineModeToString(config.navigation.customLevels.lineMode) << "\"\n"
         << "color = \"" << ColorToHex(config.navigation.customLevels.color)
         << "\"\n"
-        << "# Edit only this destination list manually. Each entry must use\n"
-        << "# exactly one level_id or level_name.\n";
+        << "# Add destinations inside targets = [ ... ], one per line.\n"
+        << "# Choose either an area ID or an English name for each entry:\n"
+        << "#   { level_id = 12 },                 # Pit Level 1\n"
+        << "#   { level_name = \"Ancient Tunnels\" }, # Keep names inside quotes\n"
+        << "# You can mix ID and name entries; use a comma after each entry.\n"
+        << "# If a name matches several areas, use its level_id instead.\n"
+        << "# Enable Custom Levels in the MapSense menu to show these lines.\n"
+        << "# Save this file and restart D2R after changing the destination list.\n"
+        << "# A line appears when a chosen area is directly connected to your current area.\n";
     SerializeCustomLevelTargets(
         output,
         config.navigation.customLevels.targets);
@@ -1904,13 +1916,46 @@ inline auto SerializeConfig(const Config& config) -> std::string {
         << "interface_scale = \""
         << MenuScaleToString(config.menu.interfaceScale) << "\"\n"
         << "show_launcher = " << config.menu.showLauncher << "\n"
-        << "start_expanded = " << config.menu.startExpanded << "\n"
         << "remember_position = " << config.menu.rememberPosition << "\n"
         << "position_x = " << config.menu.positionX << "\n"
         << "position_y = " << config.menu.positionY << "\n\n"
         << "[diagnostics]\n"
         << "enabled = " << config.diagnostics << "\n";
     return output.str();
+}
+
+// Shared by the queued menu-save path and its external-edit regression.
+inline auto SerializeMenuSettingsForSave(
+        std::string_view snapshot, std::string_view latestDocument,
+        std::optional<bool> revealPreference = std::nullopt) -> std::string {
+    auto settings = ParseConfig(snapshot);
+    auto latest = ParseConfig(latestDocument);
+    // This list is deliberately owned by the text editor. Empty means the
+    // player removed every destination; never resurrect the startup list.
+    settings.navigation.customLevels.targets =
+        std::move(latest.navigation.customLevels.targets);
+    if (revealPreference.has_value()) settings.revealMap = *revealPreference;
+    return SerializeConfig(settings);
+}
+
+enum class MenuSettingsSaveResult { Saved, ReadFailed, InvalidDocument, WriteFailed };
+
+// The UI queue and tests share the complete read/merge/write operation.
+// A preference-only save uses the current document for all ordinary settings.
+template <typename ReadDocument, typename WriteDocument>
+inline auto SaveMenuSettingsDocument(std::string_view snapshot, bool revealPreference,
+        ReadDocument&& read, WriteDocument&& write) noexcept -> MenuSettingsSaveResult {
+    try {
+        std::string latest;
+        if (!read(latest)) return MenuSettingsSaveResult::ReadFailed;
+        const auto merged = SerializeMenuSettingsForSave(
+            snapshot.empty() ? std::string_view(latest) : snapshot,
+            latest, revealPreference);
+        return write(merged) ? MenuSettingsSaveResult::Saved
+                            : MenuSettingsSaveResult::WriteFailed;
+    } catch (...) {
+        return MenuSettingsSaveResult::InvalidDocument;
+    }
 }
 
 } // namespace RuffnecKk::MapSense

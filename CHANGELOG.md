@@ -1,6 +1,23 @@
 # Changelog
 
-## [1.4.1] - Unreleased
+## [1.4.2] - 2026-09-20
+
+This is strictly a MapSense update. All other Suite components remain unchanged
+from 1.4.1.
+
+### MapSense 2.0.2
+
+- Reveal Map now remembers your preference while GPS navigation remains available independently.
+- Settings save automatically when changed through the in-game menu.
+- Custom navigation destinations added manually to the TOML are preserved when settings are saved.
+- The settings menu and all its sections start closed when entering a game.
+- Added red navigation lines for the Moldy Tome in Stony Field, Radament in Sewers Level 3, Frozenstein in Frozen River, and Nihlathak in Halls of Vaught. Frozenstein replaces the Anya destination.
+- Added clearer custom navigation examples using either an area ID or an English name. These instructions remain in the TOML after settings are saved.
+
+After manually editing custom destinations, save the TOML and fully restart D2R
+to load the updated list.
+
+## [1.4.1] - 2026-09-19
 
 - Improved compatibility with CelestialRay's Suite across the known plugin overlaps.
 - Updated MapSense 2.0.1 with Izual navigation, clearer map labels, improved renderer startup and Engine Stability compatibility.

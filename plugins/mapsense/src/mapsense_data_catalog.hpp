@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -88,6 +89,7 @@ struct DataCatalogShrine final {
 };
 
 struct DataCatalogSuperUnique final {
+    std::string id{};
     std::uint32_t hcIdx{};
     std::string classId{};
     DataCatalogLocalizedText name{};
@@ -288,6 +290,11 @@ public:
         -> std::span<const std::uint32_t>;
     [[nodiscard]] auto FindSuperUnique(std::uint32_t hcIdx) const noexcept
         -> const DataCatalogSuperUnique*;
+    // Generated SuperUnique presets encode MonStats row count + physical
+    // SuperUniques row ordinal, not hcIdx. Requires both accepted TXT families.
+    [[nodiscard]] auto ResolveSuperUniquePresetClassId(
+        std::string_view id, std::string_view expectedClass) const noexcept
+        -> std::optional<std::int32_t>;
     [[nodiscard]] auto FindMonStats(std::uint32_t hcIdx) const noexcept
         -> const DataCatalogMonStats*;
     [[nodiscard]] auto FindMonStatsByClassId(

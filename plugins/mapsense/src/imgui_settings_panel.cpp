@@ -20,11 +20,14 @@ constexpr auto LauncherHeight = 68.0F;
 
 struct PositionRuntimeState {
     ImGuiContext* context{};
+    std::uint64_t sessionGeneration{};
     ImVec2 displaySize{};
     float previousScale{1.0F};
     bool initialized{};
     bool previousExpanded{};
     bool positionDirty{};
+    bool settingsDirty{};
+    bool resetSections{true};
 };
 
 auto GetPositionRuntimeState() noexcept -> PositionRuntimeState& {
@@ -604,9 +607,8 @@ void DrawColorDetailsTooltip(
             | ImGuiColorEditFlags_PickerHueBar
             | ImGuiColorEditFlags_InputRGB;
         ImGui::SetNextItemWidth(-1.0F);
-        (void)ImGui::ColorPicker4("##Picker", channels.data(), PickerFlags);
+        saveRequested = ImGui::ColorPicker4("##Picker", channels.data(), PickerFlags);
         color = {channels[0], channels[1], channels[2], channels[3]};
-        saveRequested = ImGui::IsItemDeactivatedAfterEdit();
         ImGui::EndPopup();
     }
     return saveRequested;
@@ -658,24 +660,22 @@ struct ImmunityColorControl final {
 
     auto saveRequested = DrawMonsterMarkerShape(style.shape);
 
-    (void)ImGui::SliderFloat(
+    saveRequested |= ImGui::SliderFloat(
         UiText(UiTextId::Size),
         &style.size,
         MinimumMonsterMarkerSize,
         MaximumMonsterMarkerSize,
         "%.0f px",
         ImGuiSliderFlags_AlwaysClamp);
-    saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
 
     if (style.shape != MonsterMarkerShape::Dot) {
-        (void)ImGui::SliderFloat(
+        saveRequested |= ImGui::SliderFloat(
             UiText(UiTextId::Thickness),
             &style.thickness,
             MinimumMonsterMarkerThickness,
             MaximumMonsterMarkerThickness,
             "%.1f px",
             ImGuiSliderFlags_AlwaysClamp);
-        saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
     }
     saveRequested |= DrawMonsterMarkerColor(style.color, dpiScale);
 
@@ -686,14 +686,13 @@ struct ImmunityColorControl final {
             UiText(UiTextId::ShowNames),
             &style.showNames);
         if (style.showNames) {
-            (void)ImGui::SliderFloat(
+            saveRequested |= ImGui::SliderFloat(
                 UiText(UiTextId::NameSize),
                 &style.nameSize,
                 MinimumAutomapLabelSize,
                 MaximumAutomapLabelSize,
                 "%.0f px",
                 ImGuiSliderFlags_AlwaysClamp);
-            saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
             saveRequested |= DrawMonsterMarkerColor(
                 style.nameColor,
                 dpiScale,
@@ -715,14 +714,13 @@ struct ImmunityColorControl final {
     ImGui::SeparatorText(sectionLabel);
     auto saveRequested = ImGui::Checkbox(enabledLabel, &options.enabled);
     if (options.enabled) {
-        (void)ImGui::SliderFloat(
+        saveRequested |= ImGui::SliderFloat(
             UiText(UiTextId::TextSize),
             &options.size,
             MinimumAutomapLabelSize,
             MaximumAutomapLabelSize,
             "%.0f px",
             ImGuiSliderFlags_AlwaysClamp);
-        saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
         saveRequested |= DrawMonsterMarkerColor(
             options.color,
             dpiScale,
@@ -741,14 +739,13 @@ struct ImmunityColorControl final {
     ImGui::SeparatorText(sectionLabel);
     auto saveRequested = ImGui::Checkbox(enabledLabel, &options.enabled);
     if (options.enabled) {
-        (void)ImGui::SliderFloat(
+        saveRequested |= ImGui::SliderFloat(
             UiText(UiTextId::MarkerSize),
             &options.size,
             MinimumAutomapObjectSize,
             MaximumAutomapObjectSize,
             "%.0f px",
             ImGuiSliderFlags_AlwaysClamp);
-        saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::PushID("MarkerColor");
         saveRequested |= DrawMonsterMarkerColor(
             options.color,
@@ -770,14 +767,13 @@ struct ImmunityColorControl final {
         UiText(UiTextId::ShowChests),
         &options.enabled);
     if (options.enabled) {
-        (void)ImGui::SliderFloat(
+        saveRequested |= ImGui::SliderFloat(
             UiText(UiTextId::MarkerSize),
             &options.size,
             MinimumAutomapObjectSize,
             MaximumAutomapObjectSize,
             "%.0f px",
             ImGuiSliderFlags_AlwaysClamp);
-        saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
 
         ImGui::PushID("LockedAccentColor");
         saveRequested |= DrawMonsterMarkerColor(
@@ -807,14 +803,13 @@ struct ImmunityColorControl final {
         float dpiScale) noexcept -> bool {
     ImGui::PushID(label);
     ImGui::SeparatorText(label);
-    (void)ImGui::SliderFloat(
+    auto saveRequested = ImGui::SliderFloat(
         UiText(UiTextId::Size),
         &style.size,
         MinimumMissileMarkerSize,
         MaximumMissileMarkerSize,
         "%.0f px",
         ImGuiSliderFlags_AlwaysClamp);
-    auto saveRequested = ImGui::IsItemDeactivatedAfterEdit();
     saveRequested |= DrawMonsterMarkerColor(style.color, dpiScale);
     ImGui::PopID();
     return saveRequested;
@@ -901,6 +896,7 @@ struct ImmunityColorControl final {
 auto DrawImGuiSettingsPanel(
         Config& config,
         bool& expanded,
+        std::uint64_t sessionGeneration,
         bool revealMapEnabled,
         float menuScale,
         const ImGuiSettingsActionCallback actionCallback
@@ -913,13 +909,18 @@ auto DrawImGuiSettingsPanel(
     const auto dpiScale = std::clamp(menuScale, 1.0F, 2.0F);
     const ScopedPanelStyle style{config.menu.theme, dpiScale};
     const auto& io = ImGui::GetIO();
-    const auto frameExpanded = expanded;
     auto& positionState = GetPositionRuntimeState();
     auto* const currentContext = ImGui::GetCurrentContext();
     if (positionState.context != currentContext) {
         positionState = {};
         positionState.context = currentContext;
     }
+    if (positionState.sessionGeneration != sessionGeneration) {
+        positionState.sessionGeneration = sessionGeneration;
+        positionState.resetSections = true;
+        expanded = false;
+    }
+    const auto frameExpanded = expanded;
     const auto displaySizeChanged = positionState.initialized
         && (positionState.displaySize.x != io.DisplaySize.x
             || positionState.displaySize.y != io.DisplaySize.y);
@@ -996,6 +997,12 @@ auto DrawImGuiSettingsPanel(
                 expanded = true;
             }
         } else {
+            const auto section = [&](UiTextId id) {
+                if (positionState.resetSections) {
+                    ImGui::SetNextItemOpen(false, ImGuiCond_Always);
+                }
+                return ImGui::CollapsingHeader(UiText(id));
+            };
             if (ImGui::Button(UiText(UiTextId::Collapse))) {
                 expanded = false;
             }
@@ -1004,7 +1011,7 @@ auto DrawImGuiSettingsPanel(
                 UiText(UiTextId::EnableMapSense),
                 &config.enabled);
 
-            if (ImGui::CollapsingHeader(UiText(UiTextId::Appearance))) {
+            if (section(UiTextId::Appearance)) {
                 if (ImGui::BeginCombo(
                         UiText(UiTextId::MenuTheme),
                         MenuThemeLabel(config.menu.theme))) {
@@ -1038,9 +1045,7 @@ auto DrawImGuiSettingsPanel(
                 }
             }
 
-            if (ImGui::CollapsingHeader(
-                    UiText(UiTextId::MapAndReveal),
-                    ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (section(UiTextId::MapAndReveal)) {
                 auto revealMap = revealMapEnabled;
                 ImGui::BeginDisabled(!config.enabled);
                 if (ImGui::Checkbox(
@@ -1052,19 +1057,16 @@ auto DrawImGuiSettingsPanel(
                 }
                 ImGui::EndDisabled();
 
-                (void)ImGui::SliderFloat(
+                saveRequested |= ImGui::SliderFloat(
                     UiText(UiTextId::AdditionsOpacity),
                     &config.overlay.opacity,
                     0.10F,
                     1.0F,
                     "%.2f",
                     ImGuiSliderFlags_AlwaysClamp);
-                saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
             }
 
-            if (ImGui::CollapsingHeader(
-                    UiText(UiTextId::Monsters),
-                    ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (section(UiTextId::Monsters)) {
                 saveRequested |= ImGui::Checkbox(
                     UiText(UiTextId::ShowMonsters),
                     &config.monsters.enabled);
@@ -1093,7 +1095,7 @@ auto DrawImGuiSettingsPanel(
                 ImGui::EndDisabled();
             }
 
-            if (ImGui::CollapsingHeader(UiText(UiTextId::Immunities))) {
+            if (section(UiTextId::Immunities)) {
                 saveRequested |= ImGui::Checkbox(
                     UiText(UiTextId::ShowImmunities),
                     &config.immunities.enabled);
@@ -1104,7 +1106,7 @@ auto DrawImGuiSettingsPanel(
 
                     if (config.immunities.style
                             == ImmunityDisplayStyle::ColoredI) {
-                        (void)ImGui::SliderFloat(
+                        saveRequested |= ImGui::SliderFloat(
                             UiText(UiTextId::IndicatorSize),
                             &config.immunities.indicatorSize,
                             MinimumImmunityIndicatorSize,
@@ -1112,7 +1114,7 @@ auto DrawImGuiSettingsPanel(
                             "%.0f px",
                             ImGuiSliderFlags_AlwaysClamp);
                     } else {
-                        (void)ImGui::SliderFloat(
+                        saveRequested |= ImGui::SliderFloat(
                             UiText(UiTextId::HaloThickness),
                             &config.immunities.haloThickness,
                             MinimumImmunityHaloThickness,
@@ -1120,7 +1122,6 @@ auto DrawImGuiSettingsPanel(
                             "%.1f px",
                             ImGuiSliderFlags_AlwaysClamp);
                     }
-                    saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
 
                     ImGui::SeparatorText(UiText(UiTextId::Colors));
                     saveRequested |= DrawImmunityColors(
@@ -1129,7 +1130,7 @@ auto DrawImGuiSettingsPanel(
                 }
             }
 
-            if (ImGui::CollapsingHeader(UiText(UiTextId::Missiles))) {
+            if (section(UiTextId::Missiles)) {
                 saveRequested |= ImGui::Checkbox(
                     UiText(UiTextId::ShowMissiles),
                     &config.missiles.enabled);
@@ -1161,7 +1162,7 @@ auto DrawImGuiSettingsPanel(
                 }
             }
 
-            if (ImGui::CollapsingHeader(UiText(UiTextId::Objects))) {
+            if (section(UiTextId::Objects)) {
                 saveRequested |= ImGui::Checkbox(
                     UiText(UiTextId::ShowAutomapObjects),
                     &config.objects.enabled);
@@ -1199,15 +1200,14 @@ auto DrawImGuiSettingsPanel(
                 }
             }
 
-            if (ImGui::CollapsingHeader(UiText(UiTextId::Navigation))) {
-                (void)ImGui::SliderFloat(
+            if (section(UiTextId::Navigation)) {
+                saveRequested |= ImGui::SliderFloat(
                     UiText(UiTextId::LineThickness),
                     &config.navigation.lineThickness,
                     MinimumNavigationLineThickness,
                     MaximumNavigationLineThickness,
                     "%.1f px",
                     ImGuiSliderFlags_AlwaysClamp);
-                saveRequested |= ImGui::IsItemDeactivatedAfterEdit();
 
                 saveRequested |= DrawNavigationLineOptions(
                     UiText(UiTextId::Waypoint),
@@ -1256,6 +1256,7 @@ auto DrawImGuiSettingsPanel(
 #endif
                     );
             }
+            positionState.resetSections = false;
         }
     }
 
@@ -1274,7 +1275,12 @@ auto DrawImGuiSettingsPanel(
     }
     if (!config.menu.rememberPosition)
         positionState.positionDirty = false;
-    bounds.saveRequested = saveRequested;
+    // Keep edits pending even if a section/popup disappears before release.
+    // Dragging coalesces into one save; keyboard and discrete changes save now.
+    positionState.settingsDirty |= saveRequested;
+    bounds.saveRequested = positionState.settingsDirty
+        && !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (bounds.saveRequested) positionState.settingsDirty = false;
 
     positionState.displaySize = io.DisplaySize;
     positionState.previousScale = dpiScale;

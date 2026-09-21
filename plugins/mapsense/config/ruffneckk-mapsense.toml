@@ -2,11 +2,14 @@
 # Configure normal settings in the in-game MapSense menu.
 # Only navigation.custom_levels.targets is intended for manual editing.
 
-schema_version = 18
+schema_version = 19
 
 [general]
 # Master switch for every MapSense feature. The settings panel remains available.
 enabled = true
+# Saved across games and difficulties; independent of GPS.
+# Turning off stops revealing but does not hide cells already revealed.
+reveal_map = false
 
 [overlay]
 # Legacy diagnostic-scene switch retained for schema 2 compatibility. Keep disabled.
@@ -160,8 +163,15 @@ color = "#FF3B30FF"
 enabled = false
 line_mode = "direct"
 color = "#C75CFFFF"
-# Edit only this list manually. Each entry must contain exactly one level_id
-# or level_name. Level IDs are the safest choice when a name is ambiguous.
+# Add destinations inside targets = [ ... ], one per line.
+# Choose either an area ID or an English name for each entry:
+#   { level_id = 12 },                 # Pit Level 1
+#   { level_name = "Ancient Tunnels" }, # Keep names inside quotes
+# You can mix ID and name entries; use a comma after each entry.
+# If a name matches several areas, use its level_id instead.
+# Enable Custom Levels in the MapSense menu to show these lines.
+# Save this file and restart D2R after changing the destination list.
+# A line appears when a chosen area is directly connected to your current area.
 targets = [
   { level_id = 12 },                  # Pit Level 1
   { level_name = "Mausoleum" },       # levelId 19
@@ -176,8 +186,7 @@ theme = "sanctuary_gold"
 interface_scale = "automatic"
 # Keeps a small movable MapSense launcher visible while the panel is collapsed.
 show_launcher = true
-# Opens the full settings panel at startup instead of the launcher.
-start_expanded = false
+# The full settings panel and its sections start closed in each new game.
 # Saves the launcher/panel position in this file after dragging ends.
 remember_position = true
 position_x = 0.86

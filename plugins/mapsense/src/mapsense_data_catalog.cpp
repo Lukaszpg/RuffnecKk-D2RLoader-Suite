@@ -1604,6 +1604,10 @@ void RecountCatalogLocalizations(MapSenseDataCatalog::Impl& impl) noexcept {
             return false;
         }
         DataCatalogSuperUnique record{};
+        if (!CopyBoundedKey(row[columns[0]], limits, false, record.id)) {
+            error = "SuperUniques.txt has an invalid Superunique identity";
+            return false;
+        }
         if (!ParseUnsigned(row[columns[3]], false, record.hcIdx)) {
             error = "SuperUniques.txt has an invalid hcIdx at line "
                 + std::to_string(reader.LineNumber());
@@ -2190,6 +2194,24 @@ auto MapSenseDataCatalog::FindSuperUnique(std::uint32_t hcIdx) const noexcept
     const auto found = impl_->superUniqueByHcIdx.find(hcIdx);
     return found == impl_->superUniqueByHcIdx.end()
         ? nullptr : &impl_->superUniques[found->second];
+}
+
+auto MapSenseDataCatalog::ResolveSuperUniquePresetClassId(
+        std::string_view id, std::string_view expectedClass) const noexcept
+        -> std::optional<std::int32_t> {
+    if (!FamilyStatus(DataCatalogFamily::MonStats).Available()
+        || !FamilyStatus(DataCatalogFamily::SuperUniques).Available()) return std::nullopt;
+    std::optional<std::int32_t> result;
+    for (std::size_t row = 0; row < impl_->superUniques.size(); ++row) {
+        const auto& record = impl_->superUniques[row];
+        if (record.id != id) continue;
+        if (result.has_value() || record.classId != expectedClass) return std::nullopt;
+        const auto encoded = impl_->monStats.size() + row;
+        if (encoded > static_cast<std::size_t>(
+                (std::numeric_limits<std::int32_t>::max)())) return std::nullopt;
+        result = static_cast<std::int32_t>(encoded);
+    }
+    return result;
 }
 
 auto MapSenseDataCatalog::FindMonStats(std::uint32_t hcIdx) const noexcept

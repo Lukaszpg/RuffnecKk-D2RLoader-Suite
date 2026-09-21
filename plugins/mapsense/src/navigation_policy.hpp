@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace RuffnecKk::MapSense {
 
@@ -91,13 +92,24 @@ struct NavigationQuestPresetTarget final {
         NavigationDestinationSelection::All};
 };
 
+struct NavigationQuestSuperUnique final {
+    std::string_view id;
+    std::string_view classId;
+};
+
+// Resolve this identity against the active data catalog before comparing a
+// monster preset. Encoded IDs depend on the mod's MonStats count and row order.
+[[nodiscard]] auto QuestSuperUniqueIdentityFor(std::int32_t currentLevelId) noexcept
+    -> std::optional<NavigationQuestSuperUnique>;
+
 // Exact generated presets are the terminal POIs for ordinary quests. The
 // policy is data-only and consumes no quest state. Repeated barbarian cages
 // use NearestToPlayer so exactly one generated cage is rendered.
 [[nodiscard]] auto StaticQuestPresetTargetFor(
     std::int32_t currentLevelId,
     std::uint32_t presetType,
-    std::int32_t presetClassId) noexcept
+    std::int32_t presetClassId,
+    std::optional<std::int32_t> levelSuperUniquePresetClassId = std::nullopt) noexcept
     -> std::optional<NavigationQuestPresetTarget>;
 
 // Dynamic progression portals are discovered from exact active object Units.

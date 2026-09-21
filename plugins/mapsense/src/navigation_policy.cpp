@@ -98,10 +98,11 @@ constexpr std::array QuestRouteGraph{
 
 // Class ids are exact D2R 3.3 records consumed by generated PresetUnit records.
 // Izual's type-1 MonPreset resolves directly to stable MonStats class 256 before
-// publication. SuperUnique and MonPlace presets remain excluded because their
-// encoded ids depend on active table counts. Diablo seals are also excluded to
+// publication. Radament's SuperUnique id is supplied separately from the
+// accepted active tables. MonPlace presets remain excluded. Diablo seals are excluded to
 // avoid five simultaneous lines.
 constexpr std::array QuestPresetWitnesses{
+    QuestPresetWitness{4, PresetObject, 8},    // Moldy Tome (TowerTome)
     QuestPresetWitness{4, PresetObject, 21},   // Cairn Stone Lambda
     QuestPresetWitness{5, PresetObject, 30},   // Tree of Inifuss
     QuestPresetWitness{38, PresetObject, 26},  // Cain's Gibbet
@@ -132,8 +133,8 @@ constexpr std::array QuestPresetWitnesses{
         PresetObject,
         473,
         NavigationDestinationSelection::NearestToPlayer}, // captive cage
-    QuestPresetWitness{114, PresetObject, 558}, // frozen Anya
     QuestPresetWitness{120, PresetObject, 546}, // Ancients' altar
+    QuestPresetWitness{124, PresetObject, 462}, // Nihlathak outside-town spawn
 };
 
 // Explicit forward-progression graph for all five acts. In outdoor hubs the
@@ -330,12 +331,28 @@ auto IsStaticQuestRouteTarget(
         }) != QuestRouteGraph.end();
 }
 
+auto QuestSuperUniqueIdentityFor(std::int32_t currentLevelId) noexcept
+        -> std::optional<NavigationQuestSuperUnique> {
+    switch (currentLevelId) {
+    case 49: return NavigationQuestSuperUnique{"Radament", "radament"};
+    case 114: return NavigationQuestSuperUnique{"Frozenstein", "snowyeti4"};
+    default: return std::nullopt;
+    }
+}
+
 auto StaticQuestPresetTargetFor(
         std::int32_t currentLevelId,
         std::uint32_t presetType,
-        std::int32_t presetClassId) noexcept
+        std::int32_t presetClassId,
+        std::optional<std::int32_t> levelSuperUniquePresetClassId) noexcept
         -> std::optional<NavigationQuestPresetTarget> {
     if (currentLevelId <= 0 || presetClassId < 0) return std::nullopt;
+    if (QuestSuperUniqueIdentityFor(currentLevelId).has_value()
+        && presetType == PresetMonster
+        && levelSuperUniquePresetClassId.has_value()
+        && presetClassId == *levelSuperUniquePresetClassId) {
+        return NavigationQuestPresetTarget{};
+    }
     const auto match = std::find_if(
         QuestPresetWitnesses.begin(),
         QuestPresetWitnesses.end(),

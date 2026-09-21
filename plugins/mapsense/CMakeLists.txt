@@ -1,6 +1,6 @@
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.28)
-    project(RuffnecKkMapSense VERSION 2.0.1 LANGUAGES C CXX RC)
+    project(RuffnecKkMapSense VERSION 2.0.2 LANGUAGES C CXX RC)
     include(CTest)
     option(RUFFNECKK_SUITE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
     add_subdirectory(../../third_party/PluginSDK "${CMAKE_BINARY_DIR}/_deps/PluginSDK")
@@ -289,6 +289,20 @@ if(BUILD_TESTING)
             $<$<BOOL:${RUFFNECKK_SUITE_WARNINGS_AS_ERRORS}>:/WX>)
     endif()
     add_test(NAME ruffneckk.mapsense.fonts COMMAND ruffneckk_mapsense_font_tests)
+
+    add_executable(ruffneckk_mapsense_settings_panel_tests
+        src/imgui_settings_panel.cpp src/imgui_settings_panel_tests.cpp src/ui_localization.cpp)
+    target_compile_features(ruffneckk_mapsense_settings_panel_tests PRIVATE cxx_std_20)
+    target_compile_definitions(ruffneckk_mapsense_settings_panel_tests PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(ruffneckk_mapsense_settings_panel_tests PRIVATE
+        RuffnecKk::Common ruffneckk_mapsense_imgui tomlplusplus::tomlplusplus)
+    if(MSVC)
+        target_compile_options(ruffneckk_mapsense_settings_panel_tests PRIVATE
+            /W4 /permissive- /EHsc /utf-8
+            $<$<BOOL:${RUFFNECKK_SUITE_WARNINGS_AS_ERRORS}>:/WX>)
+    endif()
+    add_test(NAME ruffneckk.mapsense.settings-panel COMMAND ruffneckk_mapsense_settings_panel_tests)
 
     add_executable(ruffneckk_mapsense_tests
         src/external_atlas_cache.cpp
