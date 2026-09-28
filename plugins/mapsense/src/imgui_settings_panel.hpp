@@ -40,9 +40,11 @@ struct ImGuiSettingsBounds {
 
 // Draws the persistent MapSense launcher or its expanded settings panel.
 // Closing the expanded window collapses it back to the launcher.
+// A new session closes the panel and resets its sections on the render thread.
 [[nodiscard]] auto DrawImGuiSettingsPanel(
     Config& config,
     bool& expanded,
+    std::uint64_t sessionGeneration,
     bool revealMapEnabled,
     float menuScale,
     ImGuiSettingsActionCallback actionCallback

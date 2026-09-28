@@ -86,6 +86,7 @@ const D2RL::InputServiceV1* InputService{};
 const D2RL::LifecycleServiceV1* LifecycleService{};
 const D2RL::ThreadServiceV1* ThreadService{};
 Config Settings{};
+std::atomic_bool RevealMapPreference{};
 std::atomic_bool Operational{};
 std::atomic_bool FeaturesEnabled{true};
 std::atomic_bool HostApiAvailable{};
@@ -382,6 +383,7 @@ HANDLE HostRetryStopEvent{};
 HANDLE HostRetryWorker{};
 std::mutex ConfigSaveMutex;
 std::string PendingConfigSave;
+bool PendingRevealPreferenceSave{};
 bool ConfigSaveDrainScheduled{};
 std::mutex DataCatalogLoadMutex;
 std::mutex HostUiTaskMutex;
@@ -786,7 +788,7 @@ void WriteOutcome(
             kind = D2RL::ConsoleMessageKind::Output;
             break;
         case RevealOutcome::Armed:
-            message = "MapSense: Reveal Map enabled for this seed and difficulty.";
+            message = "MapSense: Reveal Map enabled; this preference applies to future games.";
             kind = D2RL::ConsoleMessageKind::Output;
             break;
         case RevealOutcome::Disarmed:
@@ -846,6 +848,7 @@ auto RequestNavigationRefresh(
     std::int32_t levelId,
     bool refreshRevealedActPoiDefinitions = false) noexcept -> bool;
 auto ExecuteTrackedRevealAction(Action action) noexcept -> RevealOutcome;
+void QueueRevealPreferenceSave() noexcept;
 auto RequestRememberedRevealForCurrentSession(
     std::int32_t targetLevelId = UnknownRevealLevelId,
     std::uint32_t delayMilliseconds = 0U,
@@ -2032,14 +2035,6 @@ auto ObserveValidatedRevealDifficulty(
         std::scoped_lock lock(RevealReplayMutex);
         observation = RevealPersistence.ObserveDifficulty(difficulty);
         if (observation == RevealDifficultyObservation::Changed) {
-            PendingRevealReplay.targetLevelId = UnknownRevealLevelId;
-            PendingRevealReplay.retriesRemaining = 0U;
-            PendingRevealReplay.automapObserved = false;
-            PendingRevealReplay.reconcilePending = false;
-            PendingRevealReplay.callbackQueued = false;
-            if (RevealReplayTimer != nullptr) {
-                SetThreadpoolTimer(RevealReplayTimer, nullptr, 0U, 0U);
-            }
             ResetProgressiveRevealLocked();
         }
     }
@@ -2048,7 +2043,7 @@ auto ObserveValidatedRevealDifficulty(
         (void)DisableRevealAll();
         if (Context != nullptr) {
             Context->LogInfo(
-                "MapSense: the difficulty changed; Reveal Map will remain off until enabled for the rerolled seed.");
+                "MapSense: the difficulty changed; Reveal Map will follow the saved preference on the new map.");
         }
     }
     return true;
@@ -2272,14 +2267,8 @@ void __cdecl RetryRememberedRevealOnUi(
     }
 
     const auto currentAct = ResolveActiveLevelAct(current.levelId);
-    bool hasAnyIntent{};
-    {
-        std::scoped_lock lock(RevealReplayMutex);
-        hasAnyIntent = RevealPersistence.HasAnyIntent();
-    }
-    if (!hasAnyIntent
-        && HasPersistedExternalRevealMapIntent(
-            current.mapSeed, current.difficulty)
+    if (RevealMapPreference.load(std::memory_order_acquire)
+        && !IsRevealAllArmed()
         && ArmRevealAll() == RevealOutcome::Armed) {
         std::scoped_lock lock(RevealReplayMutex);
         (void)RevealPersistence.SetRevealAll(current.difficulty, true);
@@ -2293,7 +2282,7 @@ void __cdecl RetryRememberedRevealOnUi(
             current.difficulty, std::memory_order_release);
         if (Context != nullptr) {
             Context->LogInfo(
-                "MapSense: Reveal Map restored for the unchanged map seed.");
+                "MapSense: Reveal Map restored from the saved preference.");
         }
     }
 
@@ -2748,18 +2737,19 @@ void ShutdownRevealReplayTimer() noexcept {
 }
 
 auto ExecuteTrackedRevealAction(Action action) noexcept -> RevealOutcome {
+    if (IsRevealAllArmAction(action) || action == Action::DisableRevealAll) {
+        const bool enabled = action == Action::ToggleRevealAll
+            ? !RevealMapPreference.load(std::memory_order_acquire)
+            : action == Action::ArmRevealAll;
+        RevealMapPreference.store(enabled, std::memory_order_release);
+        QueueRevealPreferenceSave();
+        action = enabled ? Action::ArmRevealAll : Action::DisableRevealAll;
+    }
     if (action == Action::DisableRevealAll) {
         const auto outcome = ExecuteAction(action);
-        const auto seed = ActiveRevealMapSeed.exchange(
-            0U, std::memory_order_acq_rel);
-        const auto difficulty = ActiveRevealMapDifficulty.exchange(
-            UnknownRevealDifficulty, std::memory_order_acq_rel);
-        if (seed != 0U && difficulty >= 0
-            && difficulty < static_cast<std::int32_t>(
-                RevealDifficultyCount)) {
-            (void)SetPersistedExternalRevealMapIntent(
-                seed, static_cast<std::uint8_t>(difficulty), false);
-        }
+        ActiveRevealMapSeed.store(0U, std::memory_order_release);
+        ActiveRevealMapDifficulty.store(
+            UnknownRevealDifficulty, std::memory_order_release);
         {
             std::scoped_lock lock(RevealReplayMutex);
             RevealPersistence.ClearRevealAll();
@@ -2849,16 +2839,8 @@ auto ExecuteTrackedRevealAction(Action action) noexcept -> RevealOutcome {
             current.mapSeed, std::memory_order_release);
         ActiveRevealMapDifficulty.store(
             current.difficulty, std::memory_order_release);
-        if (!SetPersistedExternalRevealMapIntent(
-                current.mapSeed, current.difficulty, true)
-            && Context != nullptr) {
-            Context->LogWarn(
-                "MapSense: Reveal Map is active, but its seed-scoped cold-start intent could not be saved.");
-        }
     } else if (IsRevealAllArmAction(action)
         && outcome == RevealOutcome::Disarmed) {
-        (void)SetPersistedExternalRevealMapIntent(
-            current.mapSeed, current.difficulty, false);
         ActiveRevealMapSeed.store(0U, std::memory_order_release);
         ActiveRevealMapDifficulty.store(
             UnknownRevealDifficulty, std::memory_order_release);
@@ -2970,18 +2952,9 @@ void __cdecl OnGameplayEvent(
         (void)EnsureUiLanguageReady();
         (void)EnsureLocalizedDataCatalogReady(event->sessionGeneration);
         GameplayReady.store(true, std::memory_order_release);
-        MenuExpanded.store(
-            Settings.menu.startExpanded || Settings.overlay.startMenuOpen,
-            std::memory_order_release);
+        MenuExpanded.store(false, std::memory_order_release);
         SetD3D12ImGuiMenuOpen(true);
         SetRevealReplayPlayerReady(event->sessionGeneration);
-#if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
-    && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
-        if (!QueueAction(Action::ArmRevealAll) && Context != nullptr) {
-            Context->LogWarn(
-                "MapSense GPS pipeline: private diagnostic auto-reveal could not be queued.");
-        }
-#endif
         if (!RequestRememberedRevealForCurrentSession(
                 UnknownRevealLevelId,
                 RevealReplayInitialDelayMilliseconds,
@@ -3099,7 +3072,7 @@ void WriteStatus(const D2RL::PluginContext* context) noexcept {
     std::snprintf(
         message,
         sizeof(message),
-            "RuffnecKk MapSense 2.0.1: active=%s; reveal-map-provider=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
+            "RuffnecKk MapSense 2.0.2: active=%s; reveal-map-provider=%s; gameplay=%s; reveal-all=%s; markers=%s; immunity-scan=%s; renderer-hooks=%s; renderer=%s; chest-textures=%s; input=%s; menu=%s; presents=%llu; rendered=%llu; level traversals=%llu; rooms=%llu; failures=%llu; traversal limits=%llu; static-poi=candidates/materialized/released/failures:%llu/%llu/%llu/%llu; static-active-room-calls=0; automap-pulses=%llu; table-scans=%llu; buckets=%llu; table-limits=%llu; automap units=%llu; monsters=%llu; enemy-rejects=dead/unit/class/alignment:%llu/%llu/%llu/%llu; filter-faults=%llu; hostiles=%llu; hostile-bands=0-80/81-140/141-220/>220:%llu/%llu/%llu/%llu; projection-rejects=%llu; clip-rejects=%llu; max-hostile-subtiles=%u; max-accepted-subtiles=%u; max-published-subtiles=%u; accepted=%llu; inserted=%llu; refreshed=%llu; fresh=%llu; expired=%llu; marker waits=%llu; storage faults=%llu; marker faults=%llu.",
         IsRevealEngineActive() ? "true" : "false",
         IsExternalLabelProviderActive() ? "ready" : "unavailable",
         GameplayReady.load(std::memory_order_acquire) ? "ready" : "inactive",
@@ -3602,20 +3575,56 @@ void __cdecl DrainSettingsSaveOnUi(
         std::string serialized;
         {
             std::scoped_lock lock(ConfigSaveMutex);
-            if (PendingConfigSave.empty()) {
+            if (PendingConfigSave.empty() && !PendingRevealPreferenceSave) {
                 ConfigSaveDrainScheduled = false;
                 return;
             }
             serialized.swap(PendingConfigSave);
+            PendingRevealPreferenceSave = false;
         }
         if (!Operational.load(std::memory_order_acquire)
             || context == nullptr) {
             continue;
         }
-        if (!context->WriteConfig(serialized.c_str())) {
-            context->LogWarn(
-                "MapSense: menu settings could not be written to the active configuration scope.");
+        const auto result = SaveMenuSettingsDocument(serialized,
+            RevealMapPreference.load(std::memory_order_acquire),
+            [context](std::string& document) {
+                std::array<char, MaximumConfigBytes> current{};
+                if (!context->ReadConfig(current.data(),
+                        static_cast<std::uint32_t>(current.size()), nullptr)) return false;
+                const auto end = std::find(current.begin(), current.end(), '\0');
+                if (end == current.end()) return false;
+                document.assign(current.data(),
+                    static_cast<std::size_t>(end - current.begin()));
+                return true;
+            },
+            [context](const std::string& document) {
+                return context->WriteConfig(document.c_str());
+            });
+        if (result == MenuSettingsSaveResult::ReadFailed) {
+            context->LogWarn("MapSense: settings were not saved because the current configuration could not be read; manual edits were preserved.");
+        } else if (result == MenuSettingsSaveResult::InvalidDocument) {
+            context->LogWarn("MapSense: settings were not saved because the current configuration is invalid; manual edits were preserved.");
+        } else if (result == MenuSettingsSaveResult::WriteFailed) {
+            context->LogWarn("MapSense: settings could not be written to the active configuration scope.");
         }
+    }
+}
+
+void QueueRevealPreferenceSave() noexcept {
+    if (!Operational.load(std::memory_order_acquire) || Context == nullptr
+        || ThreadService == nullptr || ThreadService->runOnUiThread == nullptr) return;
+    {
+        std::scoped_lock lock(ConfigSaveMutex);
+        PendingRevealPreferenceSave = true;
+        if (ConfigSaveDrainScheduled) return;
+        ConfigSaveDrainScheduled = true;
+    }
+    if (ThreadService->runOnUiThread(Context, DrainSettingsSaveOnUi, nullptr)
+        != D2RL::Threads::Result::Success) {
+        std::scoped_lock lock(ConfigSaveMutex);
+        ConfigSaveDrainScheduled = false;
+        Context->LogWarn("MapSense: Reveal Map preference save could not be queued.");
     }
 }
 
@@ -3760,7 +3769,8 @@ auto DrawMapSensePanel(bool* open, float menuScale, void*) noexcept
     auto expanded = MenuExpanded.load(std::memory_order_acquire);
     const auto featuresBefore = FeaturesEnabled.load(std::memory_order_acquire);
     const auto bounds = DrawImGuiSettingsPanel(
-        Settings, expanded, IsRevealAllArmed(), menuScale, OnImGuiSettingsAction
+        Settings, expanded, CurrentSessionGeneration.load(std::memory_order_acquire),
+        RevealMapPreference.load(std::memory_order_acquire), menuScale, OnImGuiSettingsAction
 #if defined(RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS) \
     && RUFFNECKK_MAPSENSE_ENABLE_GPS_ROUTE_DIAGNOSTICS
         , GpsRouteDiagnosticStatusTexts()
@@ -6251,7 +6261,7 @@ constexpr D2RL::PluginInfo PluginInfo{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-mapsense",
     .name = "RuffnecKk MapSense",
-    .version = "2.0.1",
+    .version = "2.0.2",
     .author = "RuffnecKk",
     .description = "Reveals maps, marks monsters, and draws navigation guidance.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
@@ -6304,6 +6314,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     {
         std::scoped_lock lock(ConfigSaveMutex);
         PendingConfigSave.clear();
+        PendingRevealPreferenceSave = false;
         ConfigSaveDrainScheduled = false;
     }
     {
@@ -6315,6 +6326,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     CancelPendingNavigationRefresh(true);
     ResetRevealReplayProcessState();
     if (!LoadConfig(Settings)) return false;
+    RevealMapPreference.store(Settings.revealMap, std::memory_order_release);
     FeaturesEnabled.store(
         Settings.enabled,
         std::memory_order_release);
@@ -6450,9 +6462,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
         context->LogWarn(
             "MapSense: native panel-state fingerprint is unavailable; MapSense map pixels will fail closed while the launcher remains available.");
     }
-    MenuExpanded.store(
-        Settings.menu.startExpanded || Settings.overlay.startMenuOpen,
-        std::memory_order_release);
+    MenuExpanded.store(false, std::memory_order_release);
     HostApiAvailable.store(true, std::memory_order_release);
     if (GiveMapSenseRendererPriority()
         == RendererHandoffResult::Failed) {
@@ -6564,7 +6574,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     std::snprintf(
         loadedMessage,
         sizeof(loadedMessage),
-        "RuffnecKk MapSense 2.0.1 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal-Map=%s; settings=active; native-panel-occlusion=%s.",
+        "RuffnecKk MapSense 2.0.2 loaded; labels/objects=%s; native-seed-atlas=%s; monster-markers=%s; Direct-navigation=%s; Reveal-Map=%s; settings=active; native-panel-occlusion=%s.",
         poiRuntimeAvailable ? "pending-localization" : "unavailable",
         externalLabelsAvailable ? "active" : "unavailable",
         markerAvailable ? "active" : "unavailable",
@@ -6612,6 +6622,7 @@ D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
     {
         std::scoped_lock lock(ConfigSaveMutex);
         PendingConfigSave.clear();
+        PendingRevealPreferenceSave = false;
         ConfigSaveDrainScheduled = false;
     }
     {

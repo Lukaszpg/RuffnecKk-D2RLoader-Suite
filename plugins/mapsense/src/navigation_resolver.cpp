@@ -65,6 +65,7 @@ constexpr std::uintptr_t OutdoorVisibilityFlagWitnessRva = 0x36177B;
 constexpr std::uintptr_t OutdoorVisibilityGeometryWitnessRva = 0x3617B3;
 constexpr std::uintptr_t CollisionGridLayoutWitnessRva = 0x36697B;
 constexpr std::uintptr_t CollisionGridHeightWitnessRva = 0x3669E6;
+constexpr std::uintptr_t SuperUniquePresetEncodingWitnessRva = 0x3E02C5;
 constexpr std::uintptr_t MonasteryAnchorWitnessRva = 0x3FFB60;
 
 constexpr std::size_t DrlgRoomRoomsNearOffset = 0x10;
@@ -2019,6 +2020,10 @@ enum class VisibilityTargetResolution : std::uint8_t {
         return false;
     }
     const auto catalog = ResolverCatalog.load(std::memory_order_acquire);
+    const auto questIdentity = QuestSuperUniqueIdentityFor(currentLevelId);
+    const auto questMonsterPreset = questIdentity.has_value() && catalog != nullptr
+        ? catalog->ResolveSuperUniquePresetClassId(questIdentity->id, questIdentity->classId)
+        : std::nullopt;
     std::size_t presetCount{};
     while (preset != nullptr && presetCount < MaximumPresetsPerRoom) {
         const auto presetType = *reinterpret_cast<const std::uint32_t*>(
@@ -2103,7 +2108,8 @@ enum class VisibilityTargetResolution : std::uint8_t {
             const auto questPreset = StaticQuestPresetTargetFor(
                 currentLevelId,
                 presetType,
-                presetId);
+                presetId,
+                questMonsterPreset);
             if (questPreset.has_value()) {
                 std::int32_t subtileX{};
                 std::int32_t subtileY{};
@@ -3038,6 +3044,18 @@ void FinalizeCanyonCorrectTomb(CandidateBatch& batch) noexcept {
         0xC1, 0x03, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00,
         0x00, 0x00, 0x89, 0x4C, 0x24, 0x3C, 0x48, 0x8B,
         0xCB, 0xE8, 0x59, 0x36, 0x07};
+    // Exact native type dispatch and MonStats-count addition; no call or hook.
+    constexpr std::array<std::uint8_t, 105U> superUniquePresetEncodingExpected{
+        0x0FU, 0xB6U, 0x44U, 0xB8U, 0x01U, 0x0FU, 0xB7U, 0x7CU, 0xBAU, 0x02U, 0x8BU, 0xC8U,
+        0x89U, 0x7CU, 0x24U, 0x40U, 0x84U, 0xC0U, 0x74U, 0x55U, 0x41U, 0x2BU, 0xCFU, 0x0FU,
+        0x84U, 0x85U, 0x00U, 0x00U, 0x00U, 0x41U, 0x3BU, 0xCFU, 0x74U, 0x0BU, 0xBFU, 0xFFU,
+        0xFFU, 0xFFU, 0xFFU, 0x89U, 0x7CU, 0x24U, 0x40U, 0xEBU, 0x75U, 0x40U, 0x0FU, 0xB6U,
+        0xCEU, 0xE8U, 0x95U, 0x07U, 0xF2U, 0xFFU, 0x48U, 0x8BU, 0x98U, 0x60U, 0x0FU, 0x00U,
+        0x00U, 0x48U, 0x63U, 0xC3U, 0x48U, 0x3BU, 0xC3U, 0x75U, 0x04U, 0x85U, 0xDBU, 0x79U,
+        0x14U, 0xC6U, 0x44U, 0x24U, 0x62U, 0x00U, 0x48U, 0x8DU, 0x4CU, 0x24U, 0x62U, 0xE8U,
+        0x43U, 0x66U, 0xCAU, 0xFFU, 0x84U, 0xC0U, 0x74U, 0x01U, 0xCCU, 0x8BU, 0x7CU, 0x24U,
+        0x40U, 0x03U, 0xFBU, 0x89U, 0x7CU, 0x24U, 0x40U, 0xEBU, 0x39U,
+    };
     constexpr std::array<std::uint8_t, 60U> monasteryAnchorExpected{
         0x49, 0x8B, 0x11, 0x8B, 0x8A, 0xF8, 0x01, 0x00,
         0x00, 0x83, 0xE9, 0x01, 0x74, 0x30, 0x83, 0xF9,
@@ -3162,6 +3180,7 @@ void FinalizeCanyonCorrectTomb(CandidateBatch& batch) noexcept {
         && check(
             OutdoorVisibilityGeometryWitnessRva,
             outdoorVisibilityGeometryExpected)
+        && check(SuperUniquePresetEncodingWitnessRva, superUniquePresetEncodingExpected)
         && check(MonasteryAnchorWitnessRva, monasteryAnchorExpected)
         && check(
             CollisionGridLayoutWitnessRva,

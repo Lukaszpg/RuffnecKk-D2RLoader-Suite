@@ -1,13 +1,19 @@
 # RuffnecKk MapSense
 
-RuffnecKk MapSense 2.0.1 is a D2RLoader client plugin for Diablo II: Resurrected.
+RuffnecKk MapSense 2.0.2 is a D2RLoader client plugin for Diablo II: Resurrected.
 It adds helper-generated GPS Walking and GPS Teleport routes while retaining the
 independent Direct Line mode. Direct lines require neither the helper nor a
 walkability grid and may cross walls. GPS Walking uses helper-generated routes,
 walkability-grid validation, continuous player following, and verified
 reconnection. GPS Teleport uses helper-generated route steps without applying
-the walking grid. MapSense 2.0.1 targets the D2RLoader 1.3 release environment
+the walking grid. MapSense 2.0.2 targets the D2RLoader 1.3 release environment
 while retaining PluginSDK API v3 as its binary interface.
+
+Version 2.0.2 saves Reveal Map in the normal configuration, preserves manually
+edited custom destinations during menu saves, and adds quest destinations for
+the Moldy Tome in Stony Field, Radament in Sewers Level 3, Frozenstein in Frozen
+River, and Nihlathak in Halls of Vaught. Frozenstein replaces the Anya destination.
+These changes are included in Suite 1.4.2, which updates MapSense only.
 
 The prior 1.0.3 compatibility candidate retained 1.0.2 and recognized both the complete
 vanilla automap serializer epilogue and the exact checked 32-bit epilogue owned
@@ -388,14 +394,15 @@ preset-ID ceilings while preserving the same fail-closed topology checks.
 
 The normal UI and Controls surface expose one `Reveal Map` toggle and one
 hotkey. Legacy console action names remain accepted only for compatibility.
-The intent is persisted by exact seed and difficulty under
-`%LOCALAPPDATA%\RuffnecKk\MapSense\atlas-cache\v1`: a cold start with the same
-seed restores it, while a different or rerolled seed does not inherit it.
+Schema 19 persists the preference as `[general].reveal_map` in the active
+MapSense TOML. Both on and off survive restarts, new map seeds and difficulty
+changes. Older configurations migrate with reveal off; obsolete seed-scoped
+intent files are ignored. GPS settings remain independent.
 Generated act geometry is cached separately and validated before publication;
 geometry cache revision 4 invalidates artifacts produced before faithful
 outdoor DT1/LvlSub/seam materialization while preserving the exact active-data
-fingerprint namespace. Reveal intent remains seed/difficulty-scoped and is not
-discarded by a geometry-cache revision.
+fingerprint namespace. Cached geometry remains seed/difficulty-specific;
+changing the preference never reuses another map's coordinates.
 Completion is tracked per native layer, not guessed for the whole act. A real
 level transition reuses the same immutable act geometry and cannot fall back to
 room materialization while `Reveal Map` is armed.
@@ -628,18 +635,42 @@ real destination families:
   stay green; after Duriel's quest is rewarded, the correct Tal Rasha tomb
   remains a green farming destination;
 - red lines to whitelisted normal-quest side routes and proven quest POIs,
-  including Izual's exact generated monster preset in the Plains of Despair,
+  including Izual in the Plains of Despair, the Moldy Tome in Stony Field,
+  Radament in Sewers Level 3, Frozenstein in Frozen River, and Nihlathak's
+  spawn point in Halls of Vaught,
   independent of quest-log state; the Canyon keeps its exact red-before-reward
   and green-after-reward exception;
 - purple lines to directly connected levels selected by the player.
 
 Activation, color, and common line thickness for all four families are edited
 live in the normal MapSense menu. Only the purple target list is edited
-manually in TOML. Every
+manually in TOML. Menu and Reveal Map saves reread the active configuration and
+preserve its latest valid target list, including removals. An unreadable or
+invalid document prevents the save and produces a warning instead of replacing
+manual edits. Restart D2R to activate externally edited destinations; this is
+preservation during saves, not automatic target reloading. Every
 entry contains exactly one `level_id` or canonical English `level_name`.
 Ambiguous names such as `Tal Rasha's Tomb`, `Sewers Level 1`, and `Tristram`
 fail closed; `level_id` remains available for those cases. The shipped examples
 cover Pit Level 1, Mausoleum, Ancient Tunnels, and Icy Cellar.
+
+To choose your own destinations, edit the `targets` list under
+`[navigation.custom_levels]` in `ruffneckk-mapsense.toml`. You can use an area
+ID, an English area name, or a mix of both:
+
+```toml
+targets = [
+  { level_id = 12 },                  # Pit Level 1, selected by ID
+  { level_name = "Ancient Tunnels" },  # Selected by name
+]
+```
+
+Use one destination per line with a comma after each entry. Keep names inside
+quotes, and use only one of `level_id` or `level_name` in each entry. Enable
+Custom Levels in the MapSense menu, then save the file and restart D2R after
+editing the list. A line appears when a chosen area is directly connected to
+your current area. These instructions and examples are kept in the configuration
+when the in-game menu saves your settings.
 
 The resolver runs only on D2RLoader's gameplay/UI lifecycle callback. D2R's
 native `DRLGROOM_FindWaypointRoomAndCoordinates` resolver selects the waypoint
@@ -734,8 +765,11 @@ Temple, Durance, Chaos Sanctuary, Ancients and Baal remain green.
 The same passive preset scan publishes proven quest objects in their own
 levels, including the Cairn Stone, Tree of Inifuss, Cain's Gibbet, Horadric
 Malus, Cube and Staff chests, Tainted Sun altar, Horadric Staff orifice,
-Khalim organ chests, Lam Esen's Tome, Compelling Orb, Hellforge, frozen Anya
-and the Ancients' altar. Repeated captive-cage presets are tagged as one
+Khalim organ chests, Lam Esen's Tome, Compelling Orb, Hellforge,
+and the Ancients' altar. Frozen River points to Frozenstein's generated boss
+location regardless of Anya's rescue status. Radament and Frozenstein use
+their identities in the active monster tables, so extended mod tables do not
+shift the destination to another monster. Repeated captive-cage presets are tagged as one
 dynamic group: all immutable endpoints are discovered once, and every automap pass
 renders only the cage nearest to the current player without another DRLG scan.
 Diablo's five seals are intentionally excluded.
@@ -889,7 +923,15 @@ menu setting is independent from automap `[overlay].scale`.
 
 The movable launcher appears only after D2R reports `LocalPlayerReady` and is
 hidden again on `GameLeft`. It expands into a compact accordion
-panel. The current candidate contains:
+panel. Each new game starts with the panel closed and every section collapsed;
+open the launcher or use the settings hotkey to expand it. Section open state
+lasts only within that game and never changes saved feature choices. Legacy
+`start_expanded` and `start_menu_open` keys are accepted but ignored.
+
+Setting changes save automatically to the active TOML: toggles and selections
+save when changed, and slider/color drags save their final value on release.
+Closing the panel is not required. Moving the panel still saves its remembered
+position after the drag ends. The current candidate contains:
 
 - one **Enable MapSense** master switch that suspends or resumes every feature
   without changing any individual choice;
@@ -1084,14 +1126,15 @@ is expected to recover its autonomous renderer if a MapSense host goes away.
 The plugin registers two independent actions in the D2R Controls menu under
 `RuffnecKk Suite`. They intentionally have no default binding:
 
-- `Toggle Reveal Map` arms or disarms the seed/difficulty-scoped native atlas;
+- `Toggle Reveal Map` changes and saves the reveal preference;
 - `Toggle MapSense Settings` expands or collapses the settings panel.
 
 The setting is also exposed as the ordinary `Reveal Map` checkbox in the ImGui
-panel. Its intent persists outside TOML under the exact seed and difficulty;
-same-seed cold starts restore it, while a reroll or difficulty change does not
-inherit it. Disarming reveal, or turning off the MapSense master, cannot erase
-cells that D2R already holds as explored.
+panel. The checkbox and hotkey save the same `[general].reveal_map` value.
+On is reapplied only after the new client map is validated; off overrides old
+seed-scoped intent files. The checkbox shows the requested preference even if
+atlas generation is unavailable. Disarming reveal, or turning off the MapSense
+master, cannot erase cells that D2R already holds as explored.
 
 The equivalent console commands are:
 

@@ -528,6 +528,106 @@ void CheckMapSenseDataCatalogContract() {
         }
 
         {
+            ScopedCatalogTestDirectory directory("quest-presets");
+            const auto excel = directory.Path() / "TestMod.mpq" / "data" / "global" / "excel";
+            WriteCompleteCatalog(excel);
+            const auto root = directory.Path().wstring();
+            const auto context = MakeCatalogContext(root.c_str());
+            WriteCatalogFixture(excel / "superuniques.txt",
+                "Superunique\tName\tClass\thcIdx\r\n"
+                "Other\tOther\tzombie1\t59\r\n"
+                "Expansion\t\t\t\r\n"
+                "Radament\tRadament\tradament\t10\r\n");
+            WriteCatalogFixture(excel / "monstats.txt",
+                "Id\tNameStr\tprimeevil\r\n"
+                "zombie1\tZombie\t0\r\n"
+                "Expansion\t\t\r\n"
+                "radament\tRadament\t0\r\n"
+                "modmonster\tModMonster\t0\r\n");
+            const auto result = MapSenseDataCatalog::Load(&context);
+            CHECK(result);
+            const auto identity = QuestSuperUniqueIdentityFor(49);
+            CHECK(identity.has_value());
+            CHECK(identity->id == "Radament" && identity->classId == "radament");
+            const auto radament = result.catalog->ResolveSuperUniquePresetClassId(identity->id, identity->classId);
+            CHECK(radament == 4); // Three real MonStats rows + SuperUnique row 1, not hcIdx 10.
+            CHECK(StaticQuestPresetTargetFor(49, 1U, 4, radament).has_value());
+            CHECK(!StaticQuestPresetTargetFor(49, 2U, 4, radament).has_value());
+            CHECK(!StaticQuestPresetTargetFor(48, 1U, 4, radament).has_value());
+            CHECK(!StaticQuestPresetTargetFor(49, 1U, 13, radament).has_value());
+            CHECK(!StaticQuestPresetTargetFor(49, 1U, 4).has_value());
+            CHECK(!result.catalog->ResolveSuperUniquePresetClassId("Radament", "zombie1").has_value());
+            CHECK(!result.catalog->ResolveSuperUniquePresetClassId("Missing", "radament").has_value());
+            // Extending MonStats changes the encoded preset without a vanilla constant.
+            WriteCatalogFixture(excel / "monstats.txt",
+                "Id\tNameStr\tprimeevil\r\n"
+                "zombie1\tZombie\t0\r\nradament\tRadament\t0\r\n"
+                "modmonster\tModMonster\t0\r\nextra\tExtra\t0\r\n");
+            const auto extended = MapSenseDataCatalog::Load(&context);
+            CHECK(extended.catalog->ResolveSuperUniquePresetClassId("Radament", "radament") == 5);
+            WriteCatalogFixture(excel / "superuniques.txt",
+                "Superunique\tName\tClass\thcIdx\r\n"
+                "Radament\tRadament\tradament\t10\r\n"
+                "Radament\tRadament\tradament\t99\r\n");
+            const auto ambiguous = MapSenseDataCatalog::Load(&context);
+            CHECK(!ambiguous.catalog->ResolveSuperUniquePresetClassId("Radament", "radament").has_value());
+        }
+        {
+            ScopedCatalogTestDirectory directory("frozenstein-quest-preset");
+            const auto excel = directory.Path() / "TestMod.mpq" / "data" / "global" / "excel";
+            WriteCompleteCatalog(excel);
+            const auto root = directory.Path().wstring();
+            const auto context = MakeCatalogContext(root.c_str());
+            WriteCatalogFixture(excel / "superuniques.txt",
+                "Superunique\tName\tClass\thcIdx\r\n"
+                "Other\tOther\tzombie1\t59\r\n"
+                "Expansion\t\t\t\r\n"
+                "Frozenstein\tFrozenstein\tsnowyeti4\t99\r\n");
+            WriteCatalogFixture(excel / "monstats.txt",
+                "Id\tNameStr\tprimeevil\r\n"
+                "zombie1\tZombie\t0\r\nExpansion\t\t\r\n"
+                "snowyeti4\tFrozenHorror\t0\r\nmodmonster\tModMonster\t0\r\n");
+            const auto result = MapSenseDataCatalog::Load(&context);
+            CHECK(result);
+            const auto identity = QuestSuperUniqueIdentityFor(114);
+            CHECK(identity.has_value());
+            CHECK(identity->id == "Frozenstein" && identity->classId == "snowyeti4");
+            CHECK(!QuestSuperUniqueIdentityFor(113).has_value());
+            CHECK(!QuestSuperUniqueIdentityFor(0).has_value());
+            const auto frozenstein = result.catalog->ResolveSuperUniquePresetClassId(
+                identity->id, identity->classId);
+            CHECK(frozenstein == 4); // Real MonStats count + physical SuperUnique row, not hcIdx.
+            const auto target = StaticQuestPresetTargetFor(114, 1U, 4, frozenstein);
+            CHECK(target.has_value());
+            CHECK(!StaticQuestPresetTargetFor(113, 1U, 4, frozenstein).has_value());
+            CHECK(!StaticQuestPresetTargetFor(114, 2U, 4, frozenstein).has_value());
+            CHECK(!StaticQuestPresetTargetFor(114, 1U, 99, frozenstein).has_value());
+            CHECK(!StaticQuestPresetTargetFor(114, 1U, 4).has_value());
+            CHECK(!StaticQuestPresetTargetFor(114, 2U, 558, frozenstein).has_value());
+            const std::array bossTarget{NavigationPointCandidate{
+                .destinationId = 114'004U, .subtileX = 5'000, .subtileY = 6'000,
+                .selection = target.value_or(NavigationQuestPresetTarget{}).selection,
+            }};
+            std::array<NavigationSubtileDestination, 4U> destinations{};
+            CHECK(BuildNavigationDestinations(NavigationPolicyInput{
+                .currentLevelId = 114, .questTargets = bossTarget,
+            }, destinations) == 1U);
+            CHECK(destinations[0].kind == NavigationLineKind::Quest);
+            CHECK(destinations[0].subtileX == 5'000 && destinations[0].subtileY == 6'000);
+            WriteCatalogFixture(excel / "monstats.txt",
+                "Id\tNameStr\tprimeevil\r\n"
+                "zombie1\tZombie\t0\r\nsnowyeti4\tFrozenHorror\t0\r\n"
+                "modmonster\tModMonster\t0\r\nextra\tExtra\t0\r\n");
+            const auto extended = MapSenseDataCatalog::Load(&context);
+            const auto extendedPreset = extended.catalog->ResolveSuperUniquePresetClassId(
+                "Frozenstein", "snowyeti4");
+            CHECK(extendedPreset == 5);
+            CHECK(StaticQuestPresetTargetFor(114, 1U, 5, extendedPreset).has_value());
+            CHECK(!StaticQuestPresetTargetFor(114, 1U, 4, extendedPreset).has_value());
+            CHECK(!extended.catalog->ResolveSuperUniquePresetClassId(
+                "Frozenstein", "snowyeti1").has_value());
+        }
+        {
             ScopedCatalogTestDirectory directory("active");
             const auto activeExcel = directory.Path()
                 / "TestMod.mpq" / "data" / "global" / "excel";
@@ -3462,6 +3562,7 @@ void CheckNavigationPolicyContract() {
             NavigationDestinationSelection::All};
     };
     constexpr std::array questPresetMatrix{
+        QuestPresetRegression{4, 2U, 8},
         QuestPresetRegression{4, 2U, 21},
         QuestPresetRegression{5, 2U, 30},
         QuestPresetRegression{38, 2U, 26},
@@ -3488,8 +3589,8 @@ void CheckNavigationPolicyContract() {
             2U,
             473,
             NavigationDestinationSelection::NearestToPlayer},
-        QuestPresetRegression{114, 2U, 558},
         QuestPresetRegression{120, 2U, 546},
+        QuestPresetRegression{124, 2U, 462},
     };
     for (const auto& regression : questPresetMatrix) {
         const auto target = StaticQuestPresetTargetFor(
@@ -3503,6 +3604,10 @@ void CheckNavigationPolicyContract() {
             regression.presetType == 2U ? 1U : 2U,
             regression.presetClassId).has_value());
     }
+    CHECK(!StaticQuestPresetTargetFor(124, 2U, 461).has_value());
+    CHECK(!StaticQuestPresetTargetFor(121, 2U, 462).has_value());
+    CHECK(!StaticQuestPresetTargetFor(114, 1U, 59).has_value());
+    CHECK(!StaticQuestPresetTargetFor(114, 2U, 558).has_value());
     CHECK(!StaticQuestPresetTargetFor(4, 2U, 30).has_value());
     CHECK(!StaticQuestPresetTargetFor(78, 2U, 407).has_value());
     CHECK(!StaticQuestPresetTargetFor(111, 2U, -1).has_value());
@@ -3525,6 +3630,21 @@ void CheckNavigationPolicyContract() {
     CHECK(plainsDestinations[0].destinationId == 105'106U);
     CHECK(plainsDestinations[1].kind == NavigationLineKind::Quest);
     CHECK(plainsDestinations[1].destinationId == 105'256U);
+
+    // Stony Field keeps both distinct quest objects and its progression exit.
+    const std::array stonyExit{NavigationExitCandidate{410U, 10, 800, 900}};
+    const std::array stonyQuests{
+        NavigationPointCandidate{408U, 500, 600},
+        NavigationPointCandidate{421U, 650, 700},
+    };
+    std::array<NavigationSubtileDestination, 4U> stonyDestinations{};
+    CHECK(BuildNavigationDestinations(NavigationPolicyInput{
+        .currentLevelId = 4, .exits = stonyExit, .questTargets = stonyQuests,
+    }, stonyDestinations) == 3U);
+    CHECK(stonyDestinations[0].kind == NavigationLineKind::Progression);
+    CHECK(stonyDestinations[1].kind == NavigationLineKind::Quest);
+    CHECK(stonyDestinations[2].kind == NavigationLineKind::Quest);
+    CHECK(stonyDestinations[1].destinationId != stonyDestinations[2].destinationId);
 
     std::int32_t converted{};
     CHECK(CheckedNavigationSubtileCoordinate(1085, 0, converted));
@@ -5821,7 +5941,7 @@ int main(int argc, char** argv) {
     CheckWaypointLabelResolutionPolicy();
     CheckExitLabelViewportPolicy();
 
-    static_assert(CurrentConfigSchemaVersion == 18);
+    static_assert(CurrentConfigSchemaVersion == 19);
     static_assert(MenuThemes.size() == 10U);
     static_assert(MenuScales.size() == 6U);
     static_assert(ResolveMenuScale(MenuScale::Automatic, 4.0F / 3.0F)
@@ -6394,7 +6514,7 @@ enabled = true
         configured.navigation.customLevels.targets[3]) == 119);
     CHECK(configured.hud.sessionTimer);
     CHECK(!configured.menu.showLauncher);
-    CHECK(configured.menu.startExpanded);
+    CHECK(!configured.menu.startExpanded);
     CHECK(!configured.menu.rememberPosition);
     CHECK(configured.menu.positionX == 0.23F);
     CHECK(configured.menu.positionY == 0.81F);
@@ -6530,7 +6650,7 @@ theme = "arcane_sanctuary"
         == MenuScale::Automatic);
     const auto serializedSchema16 = SerializeConfig(
         schema16FeatureMastersAndTheme);
-    CHECK(serializedSchema16.find("schema_version = 18")
+    CHECK(serializedSchema16.find("schema_version = 19")
         != std::string::npos);
     CHECK(serializedSchema16.find("features_enabled") == std::string::npos);
     CHECK(serializedSchema16.find("[overlay]\nenabled")
@@ -6747,11 +6867,74 @@ enabled = true
     CHECK(ColorToHex(roundTrip.navigation.customLevels.color) == "#A040F0FF");
     CHECK(roundTrip.navigation.customLevels.targets
         == configured.navigation.customLevels.targets);
+    // Reproduce a manual edit made after startup, followed by a menu save.
+    auto externalEdit = configured;
+    externalEdit.navigation.customLevels.targets = {std::int32_t{42}, std::string("Cave Level 1")};
+    const auto savedAfterExternalEdit = ParseConfig(SerializeMenuSettingsForSave(
+        serialized, SerializeConfig(externalEdit)));
+    CHECK(savedAfterExternalEdit.navigation.customLevels.targets
+        == externalEdit.navigation.customLevels.targets);
+    CHECK(savedAfterExternalEdit.menu.theme == configured.menu.theme);
+    externalEdit.navigation.customLevels.targets.clear();
+    const auto savedAfterRemoval = ParseConfig(SerializeMenuSettingsForSave(
+        serialized, SerializeConfig(externalEdit), true));
+    CHECK(savedAfterRemoval.navigation.customLevels.targets.empty());
+    CHECK(savedAfterRemoval.revealMap);
+    const auto repeatSave = ParseConfig(SerializeMenuSettingsForSave(
+        serialized, SerializeConfig(savedAfterRemoval), false));
+    CHECK(repeatSave.navigation.customLevels.targets.empty());
+    CHECK(!repeatSave.revealMap);
+    CHECK(Throws([&] { (void)SerializeMenuSettingsForSave(serialized, "schema_version = 19\n[navigation.custom_levels]\ntargets = ["); }));
+    CHECK(Throws([&] { (void)SerializeMenuSettingsForSave(serialized, "schema_version = 19\n[navigation.custom_levels]\ntargets = [{level_id=12},{level_id=12}]"); }));
+    CHECK(Throws([] { (void)ParseConfig("schema_version=19\n[general]\nreveal_map=1"); }));
+    CHECK(!ParseConfig("schema_version=18\n[general]\nenabled=true").revealMap);
+    CHECK(!ParseConfig(SerializeConfig(Config{})).revealMap);
+    for (const bool preference : {false, true}) {
+        auto savedPreference = configured;
+        savedPreference.revealMap = preference;
+        const auto restarted = ParseConfig(SerializeConfig(savedPreference));
+        CHECK(restarted.revealMap == preference);
+        CHECK(restarted.navigation.customLevels.targets == configured.navigation.customLevels.targets);
+        CHECK(restarted.navigation.waypoint.lineMode == configured.navigation.waypoint.lineMode);
+    }
+    // Exercise the same operation as the production UI save queue, with
+    // observable reads/writes and an external editor changing the document.
+    std::string document = SerializeConfig(externalEdit);
+    int writeCount{};
+    const auto readDocument = [&](std::string& output) { output = document; return true; };
+    const auto writeDocument = [&](const std::string& output) { ++writeCount; document = output; return true; };
+    CHECK(SaveMenuSettingsDocument(serialized, true, readDocument, writeDocument)
+        == MenuSettingsSaveResult::Saved);
+    CHECK(ParseConfig(document).navigation.customLevels.targets.empty());
+    CHECK(ParseConfig(document).revealMap);
+    externalEdit.navigation.customLevels.targets = {std::string("Mausoleum"), std::int32_t{119}};
+    document = SerializeConfig(externalEdit);
+    CHECK(SaveMenuSettingsDocument(serialized, false, readDocument, writeDocument)
+        == MenuSettingsSaveResult::Saved);
+    CHECK(ParseConfig(document).navigation.customLevels.targets == externalEdit.navigation.customLevels.targets);
+    CHECK(!ParseConfig(document).revealMap);
+    const auto validDocument = document;
+    document = "schema_version = 19\n[navigation.custom_levels]\ntargets = [";
+    const auto incompleteEdit = document;
+    CHECK(SaveMenuSettingsDocument(serialized, true, readDocument, writeDocument)
+        == MenuSettingsSaveResult::InvalidDocument);
+    CHECK(document == incompleteEdit && writeCount == 2);
+    CHECK(SaveMenuSettingsDocument(serialized, true,
+        [](std::string&) { return false; }, writeDocument) == MenuSettingsSaveResult::ReadFailed);
+    CHECK(document == incompleteEdit && writeCount == 2);
+    document = validDocument;
+    CHECK(SaveMenuSettingsDocument(serialized, true, readDocument,
+        [](const std::string&) { return false; }) == MenuSettingsSaveResult::WriteFailed);
+    CHECK(document == validDocument);
+    CHECK(SaveMenuSettingsDocument({}, true, readDocument, writeDocument) == MenuSettingsSaveResult::Saved);
+    CHECK(ParseConfig(document).revealMap);
+    CHECK(ParseConfig(document).navigation.customLevels.targets == externalEdit.navigation.customLevels.targets);
     CHECK(!roundTrip.hud.mercenaryHealth);
     CHECK(!roundTrip.hud.sessionTimer);
     CHECK(!roundTrip.hud.experienceTracker);
     CHECK(!roundTrip.menu.showLauncher);
-    CHECK(roundTrip.menu.startExpanded);
+    CHECK(!roundTrip.menu.startExpanded);
+    CHECK(serialized.find("start_expanded") == std::string::npos);
     CHECK(!roundTrip.menu.rememberPosition);
     CHECK(roundTrip.menu.positionX == 0.23F);
     CHECK(roundTrip.menu.positionY == 0.81F);
@@ -7008,7 +7191,7 @@ enabled = true
     CHECK(ColorToHex(schema3Migration.immunities.fire) == "#FF2200CC");
     CHECK(schema3Migration.hud.sessionTimer);
     CHECK(!schema3Migration.menu.showLauncher);
-    CHECK(schema3Migration.menu.startExpanded);
+    CHECK(!schema3Migration.menu.startExpanded);
     CHECK(!schema3Migration.menu.rememberPosition);
     CHECK(schema3Migration.menu.positionX == 0.23F);
     CHECK(schema3Migration.menu.positionY == 0.81F);
@@ -7059,7 +7242,7 @@ session_timer = true
 experience_tracker = true
 show_with_automap_only = true
 )toml");
-    CHECK(legacyRuntime.overlay.startMenuOpen);
+    CHECK(!legacyRuntime.overlay.startMenuOpen);
     CHECK(legacyRuntime.overlay.opacity == 0.90F);
     CHECK(legacyRuntime.monsters.normal.shape == MonsterMarkerShape::X);
     CHECK(legacyRuntime.monsters.minion.shape == MonsterMarkerShape::X);
