@@ -1,7 +1,14 @@
 {
   "generatedSourceSha256": "0c35659d312a06f2d07f4dedf1b4d31f735ec7aea0a3347af5c7fa5faab0fed2",
+  "protectedNativeFrame": {
+    "left": 80,
+    "right": 1082,
+    "top": 26,
+    "bottom": 280,
+    "fade": 8
+  },
   "engine": "built-in image_gen",
-  "assetRevision": 2,
+  "assetRevision": 3,
   "insert": {
     "x": 0,
     "y": 1210,
@@ -26,14 +33,14 @@
       "width": 1162,
       "height": 297,
       "bytes": 1380496,
-      "sha256": "4db3868232c0b8f28abca40a5d55a50eb617dba6a94cfef6e6183c5bdeb2e00f"
+      "sha256": "b7ea336835d532c2522a9fa23462ffd5bd32974673afed3f0d0ceba699926db8"
     },
     {
       "filename": "vendorrefreshframe.lowend.sprite",
       "width": 581,
       "height": 149,
       "bytes": 346316,
-      "sha256": "0029464672f8ef2d05f0a8589b82b44b129276a717ab33e068d16003e152d6f7"
+      "sha256": "24060e37f7d146101e43867fe425f5e9b473e827bc107f14faea4e60fec4f46b"
     }
   ]
 }

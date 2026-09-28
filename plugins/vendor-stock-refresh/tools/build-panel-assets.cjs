@@ -19,17 +19,34 @@ async function nativePng(name, frameWidth) {
   return image.png().toBuffer();
 }
 
+// This registration mask is expressed in native panel coordinates. Generated art
+// cannot replace the grid rim, outer pillars or bottom frame at either quality.
+function protectNativeFrame(rgba, width, height) {
+  for (let y = 0; y < height; ++y) for (let x = 0; x < width; ++x) {
+    const nx = x * 1162 / width, ny = y * 297 / height;
+    const coverage = Math.max(0, Math.min(1,
+      (nx - 80) / 8, (1082 - nx) / 8, (ny - 26) / 8, (280 - ny) / 8));
+    const i = (y * width + x) * 4 + 3;
+    rgba[i] = Math.round(rgba[i] * coverage);
+  }
+  return rgba;
+}
+
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   // Use a complete footer so both horizontal rails belong to one continuous texture.
   // The only crop removes the generator's black letterboxing; no feathered insert.
-  const png = await sharp(path.join(artwork, 'generated-footer-r2.png'))
+  const normalized = await sharp(path.join(artwork, 'generated-footer-r2.png'))
     .extract({ left: 0, top: 70, width: 2170, height: 540 })
     .resize(1162, 297, { fit: 'fill' }).ensureAlpha().png().toBuffer();
+  const pixels = await sharp(normalized).ensureAlpha().raw().toBuffer();
+  protectNativeFrame(pixels, 1162, 297);
+  const png = await sharp(pixels, {raw: {width: 1162, height: 297, channels: 4}}).png().toBuffer();
   fs.writeFileSync(path.join(artwork, 'vendor-refresh-frame.png'), png);
   const entries = [];
   for (const [width, height, suffix] of [[1162, 297, ''], [581, 149, '.lowend']]) {
     const rgba = await sharp(png).resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer();
+    protectNativeFrame(rgba, width, height);
     const header = Buffer.alloc(40);
     header.write('SpA1'); header.writeUInt16LE(31, 4); header.writeUInt16LE(width, 6);
     header.writeUInt32LE(width, 8); header.writeUInt32LE(height, 12); header.writeUInt32LE(1, 20);
@@ -52,12 +69,13 @@ async function main() {
     }
     // Encode the composite first: extraction before composite changes its coordinate space.
     const composed = await sharp(background).composite(layers).png().toBuffer();
-    await sharp(composed).extract({ left: 0, top: 1210, width: 1162, height: 297 })
+    await sharp(composed).extract({ left: 0, top: 1100, width: 1162, height: 407 })
       .png().toFile(path.join(artwork, `${name}-preview.png`));
   }
   }
   const manifest = { generatedSourceSha256: hash(fs.readFileSync(path.join(artwork, 'generated-footer-r2.png'))),
-    engine: 'built-in image_gen', assetRevision: 2, insert: { x: 0, y: 1210, width: 1162, height: 297 },
+    protectedNativeFrame: { left: 80, right: 1082, top: 26, bottom: 280, fade: 8 },
+    engine: 'built-in image_gen', assetRevision: 3, insert: { x: 0, y: 1210, width: 1162, height: 297 },
     goldAnchor: { x: 421, y: 1260, width: 313, height: 58 },
     refreshSlot: { x: 520, y: 1352, width: 116, height: 116 }, entries };
   fs.writeFileSync(path.join(root, 'assets/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');

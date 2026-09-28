@@ -1,12 +1,12 @@
 # Vendor Stock Refresh 2.1.3
 
 Refresh normal vendor stock without leaving the Trade screen. This update places
-its native refresh button in a centered stone-and-gold frame below the gold display. Panel revision 2 uses a continuous footer and keeps all three native buttons at 116 by 116 pixels, without a duplicate gold border.
+its native refresh button in a centered stone-and-gold frame below the gold display. Panel revision 3 preserves the original grid corners and outer frame around a continuous footer and keeps all three native buttons at 116 by 116 pixels, without a duplicate gold border.
 Gambling keeps the original refresh behavior.
 
 ## Panel download
 
-**[Download the 2.1.3 panel-assets ZIP](https://github.com/RuffDood/RuffnecKk-D2RLoader-Suite/releases/download/vendor-stock-refresh-panel-v2.1.3/RuffnecKk-vendor-stock-refresh-panel-v2.1.3.zip)**
+**[Download the 2.1.3 panel-assets ZIP](https://github.com/RuffDood/RuffnecKk-D2RLoader-Suite/releases/download/vendor-stock-refresh-panel-v2.1.3-r3/RuffnecKk-vendor-stock-refresh-panel-v2.1.3-r3.zip)**
 
 Use this artwork with Vendor Stock Refresh **2.1.3** from D2RLoader Hub.
 The panel download contains the two vendor layouts and HD/low-quality sprites;
@@ -20,19 +20,19 @@ button fallback.
 4. Launch that mod through D2RLoader and open a vendor's Trade panel.
 
 Mods with customized vendor layouts must merge these layout changes rather than
-blindly replace their existing layouts. Revision 2 has passed asset, installed-file and startup checks; its in-game rendering remains unverified.
+blindly replace their existing layouts. Revision 3 passed asset, installed-file, startup and in-game appearance/alignment checks.
 The full framed layout targets keyboard/mouse; controller mode uses the compact
 fallback. The frame is hidden and native gold/button positions restored in gambling.
 
 Panel ZIP SHA-256:
-`9CF2471B09A6CE51F0F60220C764BD16CF246780B84D64780B2BB5879E8223BC`.
+`90C4FDC2C441F2EDBC74B0A8927CD25E9E9167D213A3A3A2B79ED1D890D299BB`.
 
 ## Compatibility and verification
 
 The exact tested combination is D2RLoader **1.3.1-beta** with Battle.net D2R
 **3.3.93847**. Release build, five automated tests, installed hashes and plugin
-initialization passed; D2R completed startup 24/24. The final framed appearance,
-hover/click alignment, gambling transitions, controller input and texture-quality
+initialization passed; D2R completed startup 24/24. The framed appearance and alignment were confirmed in game.
+Hover/click behavior, gambling transitions, controller input and texture-quality
 switching still require recorded in-game validation. Persistence, multiplayer,
 Steam and CrossOver are not qualified for this update.
 

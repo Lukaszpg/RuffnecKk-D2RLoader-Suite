@@ -41,6 +41,13 @@ for (const entry of manifest.entries) {
   assert.equal(bytes.readUInt32LE(12), entry.height);
   assert.equal(bytes.readUInt32LE(20), 1);
   assert.equal(bytes.length, 40 + entry.width * entry.height * 4);
+  // Registration regression: generated pixels must never obscure original corners.
+  for (let y = 0; y < entry.height; ++y) for (let x = 0; x < entry.width; ++x) {
+    const nx = x * 1162 / entry.width, ny = y * 297 / entry.height;
+    if (nx <= 80 || nx >= 1082 || ny <= 26 || ny >= 280)
+      assert.equal(bytes[40 + (y * entry.width + x) * 4 + 3], 0,
+        'Original grid rim, pillars and outer bottom frame must remain uncovered');
+  }
   assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), entry.sha256);
 }
 console.log('PASS: native widget preservation, layering, slot bounds, controller inheritance, HD/lowend sprite headers and hashes.');

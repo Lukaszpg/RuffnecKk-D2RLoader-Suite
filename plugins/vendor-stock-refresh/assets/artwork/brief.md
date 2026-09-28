@@ -48,3 +48,7 @@ low quality SpA1 files and records their dimensions and hashes in `../manifest.j
 ## Panel revision 2
 
 Generated from the original empty footer and Vincent's desired reference. The entire 1162x297 footer replaces the small feathered center overlay, creating continuous horizontal rails. The plain stone socket has no duplicated gold button border. All native button frames remain 116x116. The generated source is generated-footer-r2.png; export crops its letterboxing at (0,70,2170,540), then scales to the native footer dimensions. Preview composites use original native sprites and are not game captures.
+
+## Panel revision 3 - fixed native frame boundaries
+
+The in-game revision 2 screenshot exposed displaced inventory-grid corners. The export now caps overlay alpha in native coordinates: left 80, right 1082, top 26 and bottom 280, with an eight-pixel inward transition. Both HD and lowend enforce this mask after resizing; tests inspect every protected pixel. The previous artwork geometry is retained inside the mask rather than relying on generated outer borders. A generated cutout proposal was inspected but not used because it changed registration. Previews now include 110 pixels of native inventory grid above the footer. Native button rectangles remain 116x116.
