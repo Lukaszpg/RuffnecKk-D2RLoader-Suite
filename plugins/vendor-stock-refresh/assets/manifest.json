@@ -1,0 +1,38 @@
+{
+  "generatedSourceSha256": "2cf5af71f76a0d58a44a8b517795ca23942777720ed47df79a260a668d363daf",
+  "engine": "built-in image_gen",
+  "insert": {
+    "x": 370,
+    "y": 1225,
+    "width": 416,
+    "height": 253
+  },
+  "goldAnchor": {
+    "x": 421,
+    "y": 1260,
+    "width": 313,
+    "height": 58
+  },
+  "refreshSlot": {
+    "x": 520,
+    "y": 1342,
+    "width": 116,
+    "height": 116
+  },
+  "entries": [
+    {
+      "filename": "vendorrefreshframe.sprite",
+      "width": 416,
+      "height": 253,
+      "bytes": 421032,
+      "sha256": "c894301836c69e08e24c60956de51948d8162245ca58e40d4b2d53add2f60154"
+    },
+    {
+      "filename": "vendorrefreshframe.lowend.sprite",
+      "width": 208,
+      "height": 127,
+      "bytes": 105704,
+      "sha256": "a59842a192b9b30c1f20c1b00f5647a0edf2abcada8d51e122a78ff2cdcff272"
+    }
+  ]
+}

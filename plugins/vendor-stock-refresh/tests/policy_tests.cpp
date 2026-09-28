@@ -244,6 +244,16 @@ int main(int argc, char** argv) {
         D2RCoreForwardingWitnessEligibilityCheckedPacket.data())
         == D2RCoreProviderProfile::EligibilityCheckedPacketProvider);
     CHECK(IdentifyD2RCoreProviderProfile(
+        D2RCoreProviderEntryLoader131.data(),
+        D2RCoreForwardingWitnessLoader131.data())
+        == D2RCoreProviderProfile::Loader131PacketProvider);
+    auto invalidLoader131Provider = D2RCoreProviderEntryLoader131;
+    invalidLoader131Provider[0x3F] ^= 0x01;
+    CHECK(IdentifyD2RCoreProviderProfile(
+        invalidLoader131Provider.data(),
+        D2RCoreForwardingWitnessLoader131.data())
+        == D2RCoreProviderProfile::Invalid);
+    CHECK(IdentifyD2RCoreProviderProfile(
         D2RCoreProviderEntry12.data(),
         D2RCoreForwardingWitness121.data())
         == D2RCoreProviderProfile::Invalid);
@@ -281,6 +291,7 @@ int main(int argc, char** argv) {
     static_assert(D2RCoreProviderSize121Release == 0x170);
     static_assert(D2RCoreProviderSizePublicPacket == 0x170);
     static_assert(D2RCoreProviderSizeEligibilityCheckedPacket == 0x1A4);
+    static_assert(D2RCoreProviderSizeLoader131 == 0x1A4);
     static_assert(D2RCoreProviderHash12.size() == 32);
     static_assert(D2RCoreProviderHash121.size() == 32);
     static_assert(D2RCoreProviderHash121Release.size() == 32);

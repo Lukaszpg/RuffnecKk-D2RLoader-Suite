@@ -1,7 +1,8 @@
 #include <D2RLPlugin/api.h>
 
 #include "native_contract.hpp"
-#include "policy.hpp"
+#include "compact_layout.hpp"
+#include "ui_scale_contract.hpp"
 
 #include <Windows.h>
 #include <bcrypt.h>
@@ -36,6 +37,7 @@ constexpr std::size_t EntityActionOffset = 1;
 constexpr std::size_t VendorEntryFilledOffset = 0x34;
 constexpr std::size_t VendorEntryRefreshPendingOffset = 0x35;
 constexpr std::size_t WidgetRectOffset = 0x70;
+constexpr std::size_t WidgetScaleOffset = 0x80;
 
 constexpr std::array<std::uint8_t, 19> SendVendorRefreshExpected{
     0x44, 0x8B, 0x05, 0x35, 0x92, 0x93, 0x02, 0xBA,
@@ -143,13 +145,16 @@ enum class PacketRoute {
 
 PacketRoute ActivePacketRoute{PacketRoute::Invalid};
 
+struct GoldPlacement {
+    void* widget{};
+    RefreshLayoutState layout{};
+};
+
 struct RefreshPlacementCache {
     void* panel{};
     void* widget{};
-    WidgetRect original{};
-    WidgetRect applied{};
-    bool hasOriginal{};
-    bool hasApplied{};
+    RefreshLayoutState layout{};
+    std::array<GoldPlacement, 3> gold{};
 };
 
 RefreshPlacementCache PlacementCache{};
@@ -167,7 +172,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = "ruffneckk-vendor-stock-refresh",
     .name = "Vendor Stock Refresh",
-    .version = "2.1.0",
+    .version = "2.1.3",
     .author = "RuffnecKk",
     .description = "Refreshes a vendor's stock with one click.",
     .flags = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
@@ -406,6 +411,15 @@ bool ValidateD2RCoreProviderAbi(
         expectedFuncInfo =
             &D2RCoreProviderFuncInfoEligibilityCheckedPacket;
         break;
+    case D2RCoreProviderProfile::Loader131PacketProvider:
+        providerRva = D2RCoreProviderRvaLoader131;
+        providerSize = D2RCoreProviderSizeLoader131;
+        providerUnwindRva = D2RCoreProviderUnwindRvaLoader131;
+        providerFuncInfoRva = D2RCoreProviderFuncInfoRvaLoader131;
+        expectedHash = &D2RCoreProviderHashLoader131;
+        expectedUnwind = &D2RCoreProviderUnwindLoader131;
+        expectedFuncInfo = &D2RCoreProviderFuncInfoLoader131;
+        break;
     default:
         return false;
     }
@@ -620,16 +634,12 @@ bool ValidateRuntime() noexcept {
             GetWidgetRectRva,
             GetWidgetRectExpected.data(),
             static_cast<std::uint32_t>(GetWidgetRectExpected.size()));
-    if (!fixedSurfacesMatch) return false;
+    if (!fixedSurfacesMatch || !UiScaleContract::Matches(
+            [](std::uintptr_t rva, const std::uint8_t* bytes, std::uint32_t size) {
+                return Context->CheckExpectedBytes(rva, bytes, size);
+            })) return false;
     ActivePacketRoute = ValidateSendNineBytePacketRoute();
     return ActivePacketRoute != PacketRoute::Invalid;
-}
-
-bool SameRect(const WidgetRect& first, const WidgetRect& second) noexcept {
-    return first.x == second.x
-        && first.y == second.y
-        && first.width == second.width
-        && first.height == second.height;
 }
 
 void* FindNamedWidget(void* panel, const char* name) noexcept {
@@ -653,22 +663,68 @@ bool ReadWidgetRect(void* widget, WidgetRect& rect) noexcept {
     }
 }
 
-bool WriteWidgetPosition(
-    void* widget,
-    std::int32_t x,
-    std::int32_t y
-) noexcept {
-    if (!widget) return false;
+bool ReadWidgetGeometry(void* widget, WidgetGeometry& geometry) noexcept {
+    if (!ReadWidgetRect(widget, geometry.rect)) return false;
     __try {
-        auto* rect = reinterpret_cast<WidgetRect*>(
-            static_cast<std::uint8_t*>(widget) + WidgetRectOffset
-        );
-        rect->x = x;
-        rect->y = y;
+        const auto* bytes = static_cast<const std::uint8_t*>(widget);
+        // A fill-parent control does not own the local dimensions used here.
+        if (bytes[0x52] != 0) return false;
+        geometry.scale = *reinterpret_cast<const float*>(bytes + WidgetScaleOffset);
+        return UsableScale(geometry.scale);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool WriteWidgetGeometry(void* widget, const WidgetGeometry& geometry) noexcept {
+    if (!widget || !UsableScale(geometry.scale)) return false;
+    __try {
+        auto* bytes = static_cast<std::uint8_t*>(widget);
+        auto* rect = reinterpret_cast<WidgetRect*>(bytes + WidgetRectOffset);
+        // Keep the original sprite dimensions. Native rendering and hit testing
+        // both multiply them by widget+0x80, including the button's child sprite.
+        rect->x = geometry.rect.x;
+        rect->y = geometry.rect.y;
+        *reinterpret_cast<float*>(bytes + WidgetScaleOffset) = geometry.scale;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// Move the existing native gold widgets rather than drawing a duplicate amount.
+// Capture all three before the first write, and retain each original for gambling.
+bool SetGoldLayout(void* panel, const WidgetRect* target) noexcept {
+    constexpr std::array names{"StashWidget", "gold_icon", "gold_amount"};
+    std::array<WidgetGeometry, 3> planned{};
+    std::array<bool, 3> write{};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        auto& cached = PlacementCache.gold[i];
+        if (!target && !cached.layout.hasApplied) continue;
+        auto* widget = FindNamedWidget(panel, names[i]);
+        WidgetGeometry current{};
+        if (!widget || !ReadWidgetGeometry(widget, current)) return false;
+        if (cached.widget != widget) cached = {.widget = widget};
+        cached.layout.Observe(current);
+        planned[i] = cached.layout.original;
+        write[i] = target || cached.layout.hasApplied;
+    }
+    if (target) {
+        const auto& anchor = PlacementCache.gold[0].layout.original.rect;
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            const auto moved = TranslateGoldWidget(planned[i], anchor, *target);
+            if (!moved.valid) return false;
+            planned[i] = moved.geometry;
+        }
+    }
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (!write[i]) continue;
+        auto& cached = PlacementCache.gold[i];
+        if (!WriteWidgetGeometry(cached.widget, planned[i])) return false;
+        if (target) cached.layout.Applied(planned[i]);
+        else cached.layout.Restored();
+    }
+    return true;
 }
 
 bool ResolveGoldAnchor(void* panel, WidgetRect& anchor) noexcept {
@@ -716,64 +772,75 @@ void __fastcall HookConfigureVendorPanel(void* panel) noexcept {
     OriginalConfigureVendorPanel(panel);
     if (!panel) return;
 
+    auto* frame = FindNamedWidget(panel, "vendor_refresh_frame");
+    SetWidgetState(frame, false);
     auto* refresh = FindNamedWidget(panel, "button_refresh");
     if (!refresh) {
         ReportPlacementFailure("button_refresh was not found");
         return;
     }
 
-    WidgetRect current{};
-    if (!ReadWidgetRect(refresh, current) || !HasUsableSize(current)) {
-        ReportPlacementFailure("button_refresh has no usable rectangle");
+    WidgetGeometry current{};
+    if (!ReadWidgetGeometry(refresh, current) || !HasUsableSize(current.rect)) {
+        SetWidgetState(refresh, false);
+        ReportPlacementFailure("button_refresh has no usable geometry");
         return;
     }
 
-    if (PlacementCache.panel != panel
-        || PlacementCache.widget != refresh
-        || !PlacementCache.hasOriginal
-        || (!PlacementCache.hasApplied
-            && !SameRect(current, PlacementCache.original))
-        || (PlacementCache.hasApplied
-            && !SameRect(current, PlacementCache.applied))) {
-        PlacementCache = {
-            .panel = panel,
-            .widget = refresh,
-            .original = current,
-            .hasOriginal = true,
-        };
+    if (PlacementCache.panel != panel || PlacementCache.widget != refresh) {
+        PlacementCache = {.panel = panel, .widget = refresh};
     }
+    auto& layout = PlacementCache.layout;
+    layout.Observe(current);
 
     if (IsGambling() != 0) {
-        if (PlacementCache.hasApplied) {
-            if (!WriteWidgetPosition(
-                    refresh,
-                    PlacementCache.original.x,
-                    PlacementCache.original.y
-                )) {
-                ReportPlacementFailure("gambling position could not be restored");
+        if (!SetGoldLayout(panel, nullptr)) {
+            SetWidgetState(refresh, false);
+            ReportPlacementFailure("gambling gold position could not be restored");
+            return;
+        }
+        if (layout.hasApplied) {
+            if (!WriteWidgetGeometry(refresh, layout.original)) {
+                SetWidgetState(refresh, false);
+                ReportPlacementFailure("gambling geometry could not be restored");
+                return;
             }
-            PlacementCache.hasApplied = false;
+            layout.Restored();
         }
         return;
     }
 
+    WidgetRect slot{};
+    WidgetRect goldTarget{};
+    CompactPlacement position{};
+    const bool panelLayout = frame
+        && ReadWidgetRect(FindNamedWidget(panel, "vendor_refresh_slot"), slot)
+        && ReadWidgetRect(FindNamedWidget(panel, "vendor_refresh_gold_anchor"), goldTarget)
+        && HasUsableSize(goldTarget)
+        && (position = CenterInPanelSlot(slot, layout.original)).valid;
+    if (!SetGoldLayout(panel, panelLayout ? &goldTarget : nullptr)) {
+        SetGoldLayout(panel, nullptr);
+        SetWidgetState(refresh, false);
+        ReportPlacementFailure("gold widgets could not follow panel layout");
+        return;
+    }
     WidgetRect anchor{};
     if (!ResolveGoldAnchor(panel, anchor)) {
+        SetGoldLayout(panel, nullptr);
         SetWidgetState(refresh, false);
         ReportPlacementFailure("gold anchor was not found");
         return;
     }
-    const auto position = CenterBelow(anchor, current);
-    if (!position.valid || !WriteWidgetPosition(refresh, position.x, position.y)) {
+    if (!panelLayout) position = CompactBelow(anchor, layout.original);
+    if (!position.valid || !WriteWidgetGeometry(refresh, position.geometry)) {
+        SetGoldLayout(panel, nullptr);
         SetWidgetState(refresh, false);
         ReportPlacementFailure("computed position was invalid");
         return;
     }
 
-    PlacementCache.applied = current;
-    PlacementCache.applied.x = position.x;
-    PlacementCache.applied.y = position.y;
-    PlacementCache.hasApplied = true;
+    layout.Applied(position.geometry);
+    SetWidgetState(frame, panelLayout);
     DynamicPlacements.fetch_add(1, std::memory_order_relaxed);
     SetWidgetState(refresh, true);
 
@@ -783,9 +850,11 @@ void __fastcall HookConfigureVendorPanel(void* panel) noexcept {
         std::snprintf(
             message,
             sizeof(message),
-            "VendorStockRefresh: dynamic button placed at %d,%d from gold anchor %d,%d,%d,%d.",
-            position.x,
-            position.y,
+            "VendorStockRefresh: %s button at %d,%d scale %.3f from gold anchor %d,%d,%d,%d.",
+            panelLayout ? "framed" : "compact fallback",
+            position.geometry.rect.x,
+            position.geometry.rect.y,
+            static_cast<double>(position.geometry.scale),
             anchor.x,
             anchor.y,
             anchor.width,
@@ -914,7 +983,7 @@ auto Status(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void
     std::snprintf(
         message,
         sizeof(message),
-        "Vendor Stock Refresh 2.1.0: %s; diagnostics=%s; placed=%llu; "
+        "Vendor Stock Refresh 2.1.3: %s; diagnostics=%s; placed=%llu; "
         "placementFailures=%llu; sent=%llu; received=%llu; armed=%llu; rejected=%llu.",
         Settings.enabled ? "active" : "disabled",
         Settings.diagnosticsEnabled ? "enabled" : "disabled",
@@ -960,7 +1029,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     if (!ReadConfiguration()) return false;
     if (!Settings.enabled) {
         context->LogInfo(
-            "VendorStockRefresh 2.1.0 by RuffnecKk loaded disabled; no hook or service registered.");
+            "VendorStockRefresh 2.1.3 by RuffnecKk loaded disabled; no hook or service registered.");
         return true;
     }
 
@@ -1047,7 +1116,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(
     }
 
     context->LogInfo(
-        "VendorStockRefresh 2.1.0 by RuffnecKk active; native button uses the runtime gold anchor.");
+        "VendorStockRefresh 2.1.3 by RuffnecKk active; native button follows the panel slot or runtime gold anchor.");
     return true;
 }
 

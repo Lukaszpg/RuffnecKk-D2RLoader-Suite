@@ -37,6 +37,7 @@ enum class D2RCoreProviderProfile {
     D2RLoader121Release,
     PublicPacketProvider,
     EligibilityCheckedPacketProvider,
+    Loader131PacketProvider,
 };
 
 inline constexpr std::uintptr_t D2RCoreProviderRva12 = 0x630D90;
@@ -308,6 +309,57 @@ inline constexpr std::array<std::uint8_t, 40>
     0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
 };
 
+// Exact D2RCore 1.3.1-beta packet provider. Its decoded instruction structure
+// and forwarding ABI match the eligibility-checked profile above; all address,
+// body-hash and unwind witnesses are independent of the Loader version string.
+inline constexpr std::uintptr_t D2RCoreProviderRvaLoader131 = 0x822DD0;
+inline constexpr std::size_t D2RCoreProviderSizeLoader131 = 0x1A4;
+inline constexpr std::uint32_t D2RCoreProviderUnwindRvaLoader131 = 0x6B7730;
+inline constexpr std::uintptr_t D2RCoreProviderFuncInfoRvaLoader131 = 0x6B7778;
+inline constexpr std::uintptr_t D2RCoreProviderForwardingSlotRvaLoader131 = 0x703A58;
+inline constexpr Sha256Digest D2RCoreProviderHashLoader131{
+    0xC1, 0xB3, 0x37, 0x1D, 0xDE, 0xFC, 0xFA, 0x88,
+    0xF9, 0x8B, 0x67, 0x65, 0x00, 0x53, 0x23, 0x91,
+    0xC0, 0xD9, 0x08, 0x00, 0x57, 0xB0, 0x4A, 0xC5,
+    0x11, 0x85, 0xE1, 0xDD, 0x03, 0xB9, 0x47, 0xDF,
+};
+inline constexpr std::array<std::uint8_t, 91> D2RCoreProviderEntryLoader131{
+    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56,
+    0x57, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x48, 0x8D,
+    0x6C, 0x24, 0x50, 0x48, 0xC7, 0x45, 0xF8, 0xFE,
+    0xFF, 0xFF, 0xFF, 0x48, 0x89, 0xCF, 0x48, 0x85,
+    0xC9, 0x0F, 0x94, 0xC0, 0x85, 0xD2, 0x0F, 0x9E,
+    0xC1, 0x08, 0xC1, 0x0F, 0x85, 0x64, 0x01, 0x00,
+    0x00, 0x89, 0xD6, 0x89, 0xD3, 0x81, 0xFA, 0x01,
+    0x02, 0x00, 0x00, 0x73, 0x7D, 0xFF, 0x15, 0x75,
+    0x0C, 0xEE, 0xFF, 0x90, 0x41, 0x89, 0xC7, 0x44,
+    0x0F, 0xB6, 0x37, 0x39, 0x05, 0x2B, 0xCD, 0xEE,
+    0xFF, 0x75, 0x2A, 0x41, 0x80, 0xFE, 0x3A, 0x41,
+    0x0F, 0x94, 0xC4,
+};
+inline constexpr std::array<std::uint8_t, 21> D2RCoreForwardingWitnessLoader131{
+    0x81, 0xFE, 0x00, 0x02, 0x00, 0x00, 0x77, 0x70,
+    0x48, 0x89, 0xF9, 0x48, 0x89, 0xDA, 0xFF, 0x15,
+    0xD4, 0x0B, 0xEE, 0xFF, 0x90,
+};
+inline constexpr std::array<std::uint8_t, 12> D2RCoreProviderPdataLoader131{
+    0xD0, 0x2D, 0x82, 0x00, 0x74, 0x2F, 0x82, 0x00,
+    0x30, 0x77, 0x6B, 0x00,
+};
+inline constexpr std::array<std::uint8_t, 32> D2RCoreProviderUnwindLoader131{
+    0x19, 0x13, 0x09, 0x55, 0x13, 0x03, 0x0E, 0x92,
+    0x0A, 0x30, 0x09, 0x70, 0x08, 0x60, 0x07, 0xC0,
+    0x05, 0xE0, 0x03, 0xF0, 0x01, 0x50, 0x00, 0x00,
+    0x30, 0xA4, 0x53, 0x00, 0x78, 0x77, 0x6B, 0x00,
+};
+inline constexpr std::array<std::uint8_t, 40> D2RCoreProviderFuncInfoLoader131{
+    0x22, 0x05, 0x93, 0x19, 0x02, 0x00, 0x00, 0x00,
+    0xA0, 0x77, 0x6B, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+    0xB0, 0x77, 0x6B, 0x00, 0x48, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+};
+
 static_assert(D2RCoreProviderEntry12 != D2RCoreProviderEntry121);
 static_assert(D2RCoreForwardingWitness12 != D2RCoreForwardingWitness121);
 static_assert(D2RCoreProviderEntry121 != D2RCoreProviderEntry121Release);
@@ -354,14 +406,19 @@ inline D2RCoreProviderProfile SelectUniqueD2RCoreProviderProfile(
     bool matches121,
     bool matches121Release,
     bool matchesPublicPacket,
-    bool matchesEligibilityCheckedPacket
+    bool matchesEligibilityCheckedPacket,
+    bool matchesLoader131Packet = false
 ) noexcept {
     if (static_cast<unsigned>(matches12)
             + static_cast<unsigned>(matches121)
             + static_cast<unsigned>(matches121Release)
             + static_cast<unsigned>(matchesPublicPacket)
-            + static_cast<unsigned>(matchesEligibilityCheckedPacket) != 1U) {
+            + static_cast<unsigned>(matchesEligibilityCheckedPacket)
+            + static_cast<unsigned>(matchesLoader131Packet) != 1U) {
         return D2RCoreProviderProfile::Invalid;
+    }
+    if (matchesLoader131Packet) {
+        return D2RCoreProviderProfile::Loader131PacketProvider;
     }
     if (matchesEligibilityCheckedPacket) {
         return D2RCoreProviderProfile::EligibilityCheckedPacketProvider;
@@ -396,12 +453,15 @@ inline D2RCoreProviderProfile IdentifyD2RCoreProviderProfile(
         && Matches(
             forwarding,
             D2RCoreForwardingWitnessEligibilityCheckedPacket);
+    const bool matchesLoader131Packet = Matches(entry, D2RCoreProviderEntryLoader131)
+        && Matches(forwarding, D2RCoreForwardingWitnessLoader131);
     return SelectUniqueD2RCoreProviderProfile(
         matches12,
         matches121,
         matches121Release,
         matchesPublicPacket,
-        matchesEligibilityCheckedPacket);
+        matchesEligibilityCheckedPacket,
+        matchesLoader131Packet);
 }
 
 inline std::optional<std::uintptr_t> AddSignedDisplacement(

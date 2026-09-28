@@ -16,6 +16,25 @@ d2rlplugin_embed_config(
 )
 
 if(BUILD_TESTING)
+    add_executable(ruffneckk_vendor_stock_refresh_panel_tests tests/panel_layout_tests.cpp)
+    target_compile_features(ruffneckk_vendor_stock_refresh_panel_tests PRIVATE cxx_std_20)
+    target_include_directories(ruffneckk_vendor_stock_refresh_panel_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(ruffneckk_vendor_stock_refresh_panel_tests PRIVATE /W4 /WX)
+    endif()
+    add_test(NAME ruffneckk.vendor-stock-refresh.panel-layout
+        COMMAND ruffneckk_vendor_stock_refresh_panel_tests)
+    find_program(VENDOR_PANEL_NODE NAMES node REQUIRED)
+    add_test(NAME ruffneckk.vendor-stock-refresh.panel-assets
+        COMMAND "${VENDOR_PANEL_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test-panel-assets.cjs")
+    add_executable(ruffneckk_vendor_stock_refresh_layout_tests tests/compact_layout_tests.cpp)
+    target_compile_features(ruffneckk_vendor_stock_refresh_layout_tests PRIVATE cxx_std_20)
+    target_include_directories(ruffneckk_vendor_stock_refresh_layout_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(ruffneckk_vendor_stock_refresh_layout_tests PRIVATE /W4 /WX)
+    endif()
+    add_test(NAME ruffneckk.vendor-stock-refresh.compact-layout
+        COMMAND ruffneckk_vendor_stock_refresh_layout_tests)
     set(RUFFNECKK_VENDOR_STOCK_REFRESH_D2RCORE_CANDIDATE "" CACHE FILEPATH
         "Optional D2RCore.dll used by Vendor Stock Refresh's exact PE contract test")
     add_executable(ruffneckk_vendor_stock_refresh_tests tests/policy_tests.cpp)
