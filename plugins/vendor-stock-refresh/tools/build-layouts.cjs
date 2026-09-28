@@ -9,9 +9,9 @@ const normal = read('vendorpanellayouthd.json');
 const controller = read('controller-vendorpanellayouthd.json');
 const insert = [
   { type: 'ImageWidget', name: 'vendor_refresh_frame', fields: {
-    rect: { x: 370, y: 1225 }, filename: 'PANEL/Vendors/RuffnecKk/VendorRefreshFrame' } },
+    rect: { x: 0, y: 1210 }, filename: 'PANEL/Vendors/RuffnecKk/VendorRefreshFrame' } },
   { type: 'Widget', name: 'vendor_refresh_slot', fields: {
-    rect: { x: 520, y: 1342, width: 116, height: 116 } } },
+    rect: { x: 520, y: 1352, width: 116, height: 116 } } },
   { type: 'Widget', name: 'vendor_refresh_gold_anchor', fields: {
     rect: { x: 421, y: 1260, width: 313, height: 58 } } },
 ];

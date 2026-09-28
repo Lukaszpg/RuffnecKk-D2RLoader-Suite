@@ -21,24 +21,14 @@ async function nativePng(name, frameWidth) {
 
 async function main() {
   fs.mkdirSync(output, { recursive: true });
-  // Crop the generator's black letterboxing, then map the approved center to the
-  // layout's native coordinate system. Keep all original pixels outside the insert.
-  const normalized = await sharp(path.join(artwork, 'generated-footer.png'))
-    .extract({ left: 0, top: 88, width: 2170, height: 595 })
-    .resize(1162, 297, { fit: 'fill' }).png().toBuffer();
-  const pixels = await sharp(normalized)
-    .extract({ left: 395, top: 15, width: 370, height: 230 })
-    .resize(416, 253, { fit: 'fill' }).ensureAlpha().raw().toBuffer();
-  // Feather only the export edges into the original dark stone. The interior,
-  // including the housing and gold details, comes from the generated artwork.
-  for (let y = 0; y < 253; ++y) for (let x = 0; x < 416; ++x) {
-    const edge = Math.min(x, 415 - x, y, 252 - y);
-    pixels[(y * 416 + x) * 4 + 3] = Math.round(255 * Math.min(1, edge / 10));
-  }
-  const png = await sharp(pixels, { raw: { width: 416, height: 253, channels: 4 } }).png().toBuffer();
+  // Use a complete footer so both horizontal rails belong to one continuous texture.
+  // The only crop removes the generator's black letterboxing; no feathered insert.
+  const png = await sharp(path.join(artwork, 'generated-footer-r2.png'))
+    .extract({ left: 0, top: 70, width: 2170, height: 540 })
+    .resize(1162, 297, { fit: 'fill' }).ensureAlpha().png().toBuffer();
   fs.writeFileSync(path.join(artwork, 'vendor-refresh-frame.png'), png);
   const entries = [];
-  for (const [width, height, suffix] of [[416, 253, ''], [208, 127, '.lowend']]) {
+  for (const [width, height, suffix] of [[1162, 297, ''], [581, 149, '.lowend']]) {
     const rgba = await sharp(png).resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer();
     const header = Buffer.alloc(40);
     header.write('SpA1'); header.writeUInt16LE(31, 4); header.writeUInt16LE(width, 6);
@@ -54,8 +44,8 @@ async function main() {
   const coin = await nativePng('coins_icon', 57);
   for (const [name, repair] of [['vendorforge_bg', true], ['vendorshop_bg', false]]) {
     const background = await nativePng('vendors/' + name);
-    const layers = [{ input: png, left: 370, top: 1225 },
-      { input: refresh, left: 520, top: 1342 }, { input: coin, left: 427, top: 1259 }];
+    const layers = [{ input: png, left: 0, top: 1210 },
+      { input: refresh, left: 520, top: 1352 }, { input: coin, left: 427, top: 1259 }];
     if (repair) {
       layers.push({ input: await nativePng('vendors/repair_button', 116), left: 169, top: 1277 });
       layers.push({ input: await nativePng('vendors/repairall_button', 116), left: 877, top: 1277 });
@@ -66,10 +56,10 @@ async function main() {
       .png().toFile(path.join(artwork, `${name}-preview.png`));
   }
   }
-  const manifest = { generatedSourceSha256: hash(fs.readFileSync(path.join(artwork, 'generated-footer.png'))),
-    engine: 'built-in image_gen', insert: { x: 370, y: 1225, width: 416, height: 253 },
+  const manifest = { generatedSourceSha256: hash(fs.readFileSync(path.join(artwork, 'generated-footer-r2.png'))),
+    engine: 'built-in image_gen', assetRevision: 2, insert: { x: 0, y: 1210, width: 1162, height: 297 },
     goldAnchor: { x: 421, y: 1260, width: 313, height: 58 },
-    refreshSlot: { x: 520, y: 1342, width: 116, height: 116 }, entries };
+    refreshSlot: { x: 520, y: 1352, width: 116, height: 116 }, entries };
   fs.writeFileSync(path.join(root, 'assets/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   console.log(`Encoded ${entries.length} panel sprites; optional previews require VENDOR_PANEL_REFERENCE_ROOT.`);
 }

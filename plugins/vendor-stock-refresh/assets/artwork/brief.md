@@ -44,3 +44,7 @@ and feather its outer ten pixels. Only that center insert is used in the game;
 generated side grilles and borders are discarded. The existing native refresh
 sprite is rendered over the empty socket by the game. The recipe encodes high and
 low quality SpA1 files and records their dimensions and hashes in `../manifest.json`.
+
+## Panel revision 2
+
+Generated from the original empty footer and Vincent's desired reference. The entire 1162x297 footer replaces the small feathered center overlay, creating continuous horizontal rails. The plain stone socket has no duplicated gold button border. All native button frames remain 116x116. The generated source is generated-footer-r2.png; export crops its letterboxing at (0,70,2170,540), then scales to the native footer dimensions. Preview composites use original native sprites and are not game captures.

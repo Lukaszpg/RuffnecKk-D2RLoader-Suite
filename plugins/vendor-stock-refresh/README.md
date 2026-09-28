@@ -1,7 +1,7 @@
 # Vendor Stock Refresh 2.1.3
 
 Refresh normal vendor stock without leaving the Trade screen. This update places
-its native refresh button in a centered stone-and-gold frame below the gold display.
+its native refresh button in a centered stone-and-gold frame below the gold display. Panel revision 2 uses a continuous footer and keeps all three native buttons at 116 by 116 pixels, without a duplicate gold border.
 Gambling keeps the original refresh behavior.
 
 ## Panel download
@@ -21,12 +21,12 @@ button fallback.
 4. Launch that mod through D2RLoader and open a vendor's Trade panel.
 
 Mods with customized vendor layouts must merge these layout changes rather than
-blindly replace their existing layouts. The installed integration was BKVince.
+blindly replace their existing layouts. Panel revision 1 was installed in BKVince. Revision 2 has passed offline asset and layout checks; its in-game rendering remains unverified.
 The full framed layout targets keyboard/mouse; controller mode uses the compact
 fallback. The frame is hidden and native gold/button positions restored in gambling.
 
 Panel ZIP SHA-256:
-`3FF2E26AADDCEA3606D9587CCAC6575AAC14CD45D7DC63212758C5B5E02BDE51`.
+`9CF2471B09A6CE51F0F60220C764BD16CF246780B84D64780B2BB5879E8223BC`.
 
 ## Compatibility and verification
 

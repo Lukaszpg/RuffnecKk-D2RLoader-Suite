@@ -1,11 +1,12 @@
 {
-  "generatedSourceSha256": "2cf5af71f76a0d58a44a8b517795ca23942777720ed47df79a260a668d363daf",
+  "generatedSourceSha256": "0c35659d312a06f2d07f4dedf1b4d31f735ec7aea0a3347af5c7fa5faab0fed2",
   "engine": "built-in image_gen",
+  "assetRevision": 2,
   "insert": {
-    "x": 370,
-    "y": 1225,
-    "width": 416,
-    "height": 253
+    "x": 0,
+    "y": 1210,
+    "width": 1162,
+    "height": 297
   },
   "goldAnchor": {
     "x": 421,
@@ -15,24 +16,24 @@
   },
   "refreshSlot": {
     "x": 520,
-    "y": 1342,
+    "y": 1352,
     "width": 116,
     "height": 116
   },
   "entries": [
     {
       "filename": "vendorrefreshframe.sprite",
-      "width": 416,
-      "height": 253,
-      "bytes": 421032,
-      "sha256": "c894301836c69e08e24c60956de51948d8162245ca58e40d4b2d53add2f60154"
+      "width": 1162,
+      "height": 297,
+      "bytes": 1380496,
+      "sha256": "4db3868232c0b8f28abca40a5d55a50eb617dba6a94cfef6e6183c5bdeb2e00f"
     },
     {
       "filename": "vendorrefreshframe.lowend.sprite",
-      "width": 208,
-      "height": 127,
-      "bytes": 105704,
-      "sha256": "a59842a192b9b30c1f20c1b00f5647a0edf2abcada8d51e122a78ff2cdcff272"
+      "width": 581,
+      "height": 149,
+      "bytes": 346316,
+      "sha256": "0029464672f8ef2d05f0a8589b82b44b129276a717ab33e068d16003e152d6f7"
     }
   ]
 }
