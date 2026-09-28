@@ -15,13 +15,12 @@ button fallback.
 
 1. Close the game and back up the vendor layouts you are replacing.
 2. Extract the ZIP into `<Game>/mods/<Mod>/<Mod>.mpq/`, preserving its `data/` folder.
-   For BKVince, use `<Game>/mods/BKVince/BKVince.mpq/`.
 3. Install the 2.1.3 plugin in the global or selected mod's `d2rloader/plugins/`
    folder. Preserve your existing `ruffneckk-vendor-stock-refresh.toml`.
 4. Launch that mod through D2RLoader and open a vendor's Trade panel.
 
 Mods with customized vendor layouts must merge these layout changes rather than
-blindly replace their existing layouts. Panel revision 1 was installed in BKVince. Revision 2 has passed offline asset and layout checks; its in-game rendering remains unverified.
+blindly replace their existing layouts. Revision 2 has passed asset, installed-file and startup checks; its in-game rendering remains unverified.
 The full framed layout targets keyboard/mouse; controller mode uses the compact
 fallback. The frame is hidden and native gold/button positions restored in gambling.
 
